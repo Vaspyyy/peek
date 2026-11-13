@@ -48,7 +48,7 @@ peek: data.json  JSON, 374 B, object with 3 keys
 next: peek data.json '.levels[0]'   the first element in full
 ```
 
-Every path appears once. Arrays are merged, so `.levels[].id` covers the `id` of every element, and a field that only some elements have says how many (`in 1 of 3`). Strings show their value, the counts of a few repeated values, or the number of distinct values with examples; numbers show their range; booleans their counts. An object with more than 40 keys is read as a map (IDs to records): it shows how many keys it has with examples, and its values merged under `.[]`, as in jq.
+Every path appears once. Arrays are merged, so `.levels[].id` covers the `id` of every element, and a field that only some elements have says how many (`in 1 of 3`). Strings show their value, the counts of a few repeated values, or the number of distinct values with examples; numbers show their range; booleans their counts. Where every object at a path has more than 40 keys and all their values have one kind (IDs to records, names to strings), the objects are read as maps: the card shows how many keys they have with examples, and their values merged under `[]`, as in jq. Numbers are shown as written, so a range of 19-digit IDs or epoch times isn't rounded. Past 200 distinct strings at one path, the most frequent ones are estimates (`most often about`).
 
 The paths are jq paths, so any printed path can be given back (quote it, since `[` is special to the shell):
 
@@ -69,7 +69,7 @@ peek: data.json .levels[1]  object with 3 keys
 }
 ```
 
-`.a.b`, `.a[0]`, `.a[-1]`, `.a[]` (every element, or every value of an object), `.["a key"]` and `."a key"` work. One value is printed as JSON, with strings over 200 characters clipped and long arrays and objects cut; a value too long for the budget gets its shape card instead. Several values (through `[]`) are listed one per line when they are few scalars, and summarized otherwise. A path that selects nothing says where it stopped (`no key "levles" in .; its keys: name, levels, settings`) and exits with 1. A file that isn't valid JSON gets the line and column of the problem.
+`.a.b`, `.a[0]`, `.a[-1]`, `.a[]` (every element, or every value of an object), `.["a key"]` and `."a key"` work; a repeated key gives its last value, as in jq. One value is printed as JSON, with strings over 200 characters clipped and long arrays and objects cut (`-b 0` prints them in full); a value too long for the budget gets its shape card instead. Several values (through `[]`) are listed one per line when they are few scalars, and summarized otherwise; when some elements along the way didn't have the path, the header says how many. A path that selects nothing says where it stopped (`no key "levles" in .; its keys: name, levels, settings`) and exits with 1. A file that isn't valid JSON gets the line and column of the problem.
 
 ### JSON Lines
 
@@ -82,7 +82,7 @@ The columns with their type and values (empty cells are counted), then the first
 ### Text and logs
 
 ```
-$ peek run.log
+$ peek run.log -b 20
 peek: run.log  8,248 lines, 279 KB; 3 errors, 41 warnings
 errors (3, 2 kinds)
   L1210  ERROR: Node not found: "Player/Camera"   ×2, also L1460
@@ -96,25 +96,32 @@ first lines
      2  loading level_02
      3  W 5.5 tick=0 pos=(9.52, -4.90)
 last lines
-  8239  W 5.5 tick=8192 pos=(13.11, -2.10)
-  …
+  8242  W 5.5 tick=8195 pos=(35.08, -5.93)
+  8243  W 5.5 tick=8196 pos=(30.32, -0.34)
+  8244  W 5.5 tick=8197 pos=(26.52, -4.41)
+  8245  W 5.5 tick=8198 pos=(37.83, -6.71)
+  8246  W 5.5 tick=8199 pos=(15.31, -2.83)
   8247  RUN 12 done in 4.2 s
   8248  REGRESS EXIT 1
 next: peek run.log 1205-1225   the lines around the first error
 ```
 
-Lines are grouped by template: the line with its numbers (and their signs), hex values and IDs replaced by `<n>`, and runs of spaces as one. That is what turns 8,200 progress lines into one.
+Lines are grouped by template: the line with its numbers (and their signs), hex values and IDs (UUIDs too) replaced by `<n>`, and runs of spaces as one. That is what turns 8,200 progress lines into one. Errors are listed in the order they first appear (the first is often the cause), with the two most frequent kinds always among them.
 
-A line is an error or a warning by the level its logger wrote (`ERROR`, `FATAL`, `[main/WARN]`, `level=INFO`, …) when it has one, and otherwise by its words: `error`, `fatal`, `panic`, `exception`, `traceback`, `fail`, `failed`, `failure`, `segfault` or a line starting with `not ok` for errors, `warn` or `warning` for warnings, but not in `0 errors`, `no warnings` or `errors: 0`.
+A line is an error or a warning by the level it starts with or its logger wrote (`error:`, `warning[…]:`, `level=info`, `"level":"warn"`, `ERROR`, `[main/WARN]`, `INF`, `WRN`, …) when it has one. Otherwise:
+
+- lines of passing tests (`ok  pkg`, `--- PASS`, `=== RUN`, `test x ... ok`) are neither, whatever their names say;
+- a compiler's `path:line:col: message` is an error;
+- the words `error`, `fatal`, `panic`, `exception`, `traceback`, `fail`, `failed`, `failure`, `segfault`, a line starting with `not ok`, `2 failing`, or a name like `ValueError` or `IOException` make an error, and `warn`, `warning` or a name like `DeprecationWarning` a warning. A word inside a name (`pkg/errors`, `TestDecode/error`, `errors::parses`) doesn't count, nor do `0 errors`, `no warnings`, `Errors: 0`, `0 tests failed` or `fail-fast`, while the rest of the line still does (`Failures: 3, Errors: 0` is an error).
 
 Long lines keep their start and their end with the middle cut (`…(1,505 chars)…`), since the end of an error line often says why. A text that fits the budget is shown whole.
 
-- `-g PATTERN`: the lines matching a regular expression (Go syntax; `-i` ignores case), grouped by template the same way. Exit code 1 if nothing matches.
+- `-g PATTERN`: the lines matching a regular expression (Go syntax; `-i` ignores case), grouped by template the same way. Exit code 1 if nothing matches. `-g` and `-t` are for text; on JSON or CSV, `--as text` reads the file as text first.
 - `LINES`: `peek run.log 1200-1240` prints those lines, `-t N` the last N, clipped.
 
 ### Anything else
 
-A file is read by its extension (`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `.log`, `.txt`, …), else by its content. `--as json|jsonl|csv|tsv|text` overrides that. A binary file (NUL bytes, or the first bytes of PNG, JPEG, gzip, zip, ELF, PDF, SQLite and a few more) is named, not printed. Standard input works for any kind: `gh api repos/o/r/pulls | peek`, `| peek '.[].title'`.
+A file is read by its extension (`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `.log`, `.txt`, …), else by its content: JSON as far as the first 64 KB go (a `[10:00:00]` log isn't), lines that are each JSON, or at least three rows that split evenly on commas, tabs, semicolons or pipes. `--as json|jsonl|csv|tsv|text` overrides that. A byte order mark is skipped. A binary file (NUL bytes, or the first bytes of PNG, JPEG, gzip, zip, ELF, PDF, SQLite and a few more) is named, not printed. Standard input works for any kind: `gh api repos/o/r/pulls | peek`, `| peek '.[].title'`, `| peek .`; `next:` hints are left out there, since they'd name a file that doesn't exist.
 
 ### Flags
 
@@ -129,7 +136,7 @@ A file is read by its extension (`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `
 | `-h`, `--help` | help |
 | `-V`, `--version` | version |
 
-What doesn't fit the budget is counted, not dropped silently: `… 12 more paths deeper`, `… 3 more kinds`. Exit code: 0 shown, 1 a path, pattern or line range matched nothing, 2 bad input.
+What doesn't fit the budget is counted, not dropped silently: `… 12 more paths`, `… 3 more kinds`, `… left out for the budget: last lines`. A JSON card shows every level that fits whole and then as much of the next as fits. Exit code: 0 shown, 1 a path, pattern or line range matched nothing, 2 bad input.
 
 ## For coding agents
 

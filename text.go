@@ -19,11 +19,21 @@ const (
 var (
 	// a level a logger or compiler wrote, which wins over the words in the
 	// message: "warning: x failed" (gcc, cargo), "level=info", "[main/WARN]"
-	reLead     = regexp.MustCompile(`(?i)^\s*(error|err|fatal|panic|warning|warn|info|note|notice|debug|trace|hint|help)(\[[^\]]*\])?:`)
-	reKV       = regexp.MustCompile(`(?i)\b(?:level|lvl|severity)"?\s*[=:]\s*"?([a-z]+)`)
-	reLevel    = regexp.MustCompile(`\b(TRACE|DEBUG|FINE|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|CRIT|SEVERE|PANIC)\b`)
+	reLead  = regexp.MustCompile(`(?i)^\s*(error|err|fatal|panic|warning|warn|info|note|notice|debug|trace|hint|help)(\[[^\]]*\])?:`)
+	reKV    = regexp.MustCompile(`(?i)\b(?:level|lvl|severity)"?\s*[=:]\s*"?([a-z]+)`)
+	reLevel = regexp.MustCompile(`\b(TRACE|TRC|DEBUG|DBG|FINE|INFO|INF|NOTICE|WARN|WARNING|WRN|ERROR|ERR|FATAL|FTL|CRITICAL|CRIT|SEVERE|PANIC)\b`)
+	// lines of passing tests, whatever their names say ("--- PASS: TestError")
+	rePass = regexp.MustCompile(`^\s*(ok\s|--- PASS|=== (RUN|PAUSE|CONT|NAME)\b|PASS\s*$|test .* \.\.\. ok\s*$)`)
+	// a compiler's or linter's "path:line:col: message"
+	reLocated = regexp.MustCompile(`^\S+\.\w+:\d+(:\d+)?: `)
+	// CamelCase names of errors and warnings: ValueError, IOException
+	reErrName  = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*(Error|Exception)\b`)
+	reWarnName = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*Warning\b`)
+	// words that aren't failures: "fail-fast", "failover"
+	reNotFail  = regexp.MustCompile(`(?i)\bfail-(fast|safe|over)\b|\bfailover\b`)
+	reFailing  = regexp.MustCompile(`\b[1-9]\d* failing\b`)
 	reError    = regexp.MustCompile(`(?i)\b(errors?|fatal|panic(ked)?|exceptions?|traceback|fail(s|ed|ures?)?|segfault)\b|^not ok\b`)
-	reNotError = regexp.MustCompile(`(?i)\b(0|no|zero) (errors?|failures?|failed)\b|\b(errors?|failures?|failed)[:=] ?0\b`)
+	reNotError = regexp.MustCompile(`(?i)\b(0|no|zero)( \w+)? (errors?|failures?|failed)\b|\b(errors?|failures?|failed)[:=] ?0\b`)
 	reWarn     = regexp.MustCompile(`(?i)\bwarn(ing|ings|s)?\b`)
 	reNotWarn  = regexp.MustCompile(`(?i)\b(0|no|zero) warn(ing|ings|s)?\b|\bwarn(ing|ings|s)?[:=] ?0\b`)
 )
@@ -170,21 +180,47 @@ func severity(line string) int {
 	if m := reLevel.FindString(line); m != "" {
 		return levelOf(m)
 	}
-	if reError.MatchString(line) && !reNotError.MatchString(line) {
+	if rePass.MatchString(line) {
+		return 0
+	}
+	if reLocated.MatchString(line) {
+		return 2 // a compiler error; its warnings and notes say so first
+	}
+	// "0 errors" and "Errors: 0" go, and so does the rest's meaning
+	clean := reNotFail.ReplaceAllString(reNotError.ReplaceAllString(line, " "), " ")
+	if errorWord(clean) || reErrName.MatchString(clean) || reFailing.MatchString(clean) {
 		return 2
 	}
-	if reWarn.MatchString(line) && !reNotWarn.MatchString(line) {
+	clean = reNotWarn.ReplaceAllString(line, " ")
+	if reWarn.MatchString(clean) || reWarnName.MatchString(clean) {
 		return 1
 	}
 	return 0
 }
 
+// errorWord finds an error word that isn't part of a name: "error" in
+// "build error" counts, in "pkg/errors", "TestDecode/error" or
+// "errors::parses_ok" it doesn't.
+func errorWord(line string) bool {
+	for _, m := range reError.FindAllStringIndex(line, -1) {
+		a, b := m[0], m[1]
+		inName := a > 0 && strings.IndexByte("/._", line[a-1]) >= 0 ||
+			b < len(line) && strings.IndexByte("/._", line[b]) >= 0 ||
+			b+1 < len(line) && line[b] == ':' && line[b+1] == ':' ||
+			a > 1 && line[a-1] == ':' && line[a-2] == ':'
+		if !inName {
+			return true
+		}
+	}
+	return false
+}
+
 // levelOf is the severity of a level's name.
 func levelOf(level string) int {
 	switch strings.ToLower(level) {
-	case "warn", "warning":
+	case "warn", "warning", "wrn":
 		return 1
-	case "error", "err", "fatal", "critical", "crit", "severe", "panic", "emerg", "alert":
+	case "error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert":
 		return 2
 	}
 	return 0
@@ -268,7 +304,7 @@ func hexLike(w string) bool {
 	if strings.HasPrefix(w, "0x") || strings.HasPrefix(w, "0X") {
 		return len(w) > 2
 	}
-	if len(w) < 7 {
+	if len(w) < 4 { // a UUID's shortest part has 4
 		return false
 	}
 	for i := 0; i < len(w); i++ {
@@ -277,7 +313,7 @@ func hexLike(w string) bool {
 			return false
 		}
 	}
-	return true
+	return true // normWord only asks when the word has a digit
 }
 
 // clipLine shortens a long line for display: its start and its end, and how
@@ -319,6 +355,9 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 		head += fmt.Sprintf("; %s, %s", plural(t.errs.lines, "error"), plural(t.warns.lines, "warning"))
 	}
 	fmt.Fprintln(w, head)
+	if t.all.over {
+		fmt.Fprintf(w, "… over %s kinds of lines: kinds that first appear after that aren't counted\n", count(maxTemplates))
+	}
 
 	// a short text is shown whole
 	if t.keepAll > 0 && t.lines <= t.keepAll {
@@ -348,9 +387,32 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 		if len(order) > show && show > 1 && room-1 == show {
 			show-- // room for the "more" line
 		}
+		// in the order they first appeared (the first is often the cause),
+		// but the two most frequent kinds are always among them
+		pick := order[:show]
+		if len(order) > show && show >= 3 {
+			byCount := append([]string(nil), order...)
+			sort.SliceStable(byCount, func(i, j int) bool { return gs.by[byCount[i]].count > gs.by[byCount[j]].count })
+			keep := map[string]bool{}
+			for _, tm := range order[:show-2] {
+				keep[tm] = true
+			}
+			for _, tm := range byCount {
+				if len(keep) == show {
+					break
+				}
+				keep[tm] = true
+			}
+			pick = pick[:0:0]
+			for _, tm := range order {
+				if keep[tm] {
+					pick = append(pick, tm)
+				}
+			}
+		}
 		fmt.Fprintln(w, title)
 		room--
-		for _, tm := range order[:show] {
+		for _, tm := range pick {
 			fmt.Fprintln(w, groupLine(gs.by[tm], nw))
 			room--
 		}
@@ -393,6 +455,10 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 		for _, tm := range rep.order[:show] {
 			g := rep.by[tm]
 			fmt.Fprintf(w, "  ×%-6s %-*s  %s\n", count(g.count), nw*2+1, fmt.Sprintf("L%d-%d", g.first, g.last), clipLine(tm))
+			room--
+		}
+		if rest := len(rep.order) - show; rest > 0 && room > 3 {
+			fmt.Fprintf(w, "  … %s more repeated\n", plural(rest, "kind"))
 			room--
 		}
 	} else if len(rep.order) > 0 {

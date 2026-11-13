@@ -127,7 +127,9 @@ func TestPrettyClips(t *testing.T) {
 	out, _ := peek(t, "", p, ".")
 	wants(t, out, "… +300 chars")
 	out, _ = peek(t, "", p, ".a")
-	wants(t, out, "array of 30 values")
+	wants(t, out, "array of 30 numbers", "… 20 more")
+	out, _ = peek(t, "", p, "-b", "0", ".s")
+	wants(t, out, strings.Repeat("x", 500)+`"`)
 }
 
 func TestBigValueGivesShape(t *testing.T) {
@@ -179,7 +181,7 @@ func TestBudget(t *testing.T) {
 	b.WriteString("}")
 	p := file(t, "deep.json", b.String())
 	out, _ := peek(t, "", p, "-b", "40")
-	wants(t, out, ".k0 ", "more paths deeper")
+	wants(t, out, ".k0 ", ".k29 ", ".k0.a ", "more paths (a path shows one part")
 	lacks(t, out, ".k0.a.b")
 	if n := strings.Count(out, "\n"); n > 41 {
 		t.Errorf("%d lines for a budget of 40", n)
@@ -203,7 +205,7 @@ func TestStdin(t *testing.T) {
 	}
 	wants(t, out, "peek: stdin .[].a  2 values", "1\n2\n")
 	out, _ = peek(t, `[{"a": 1}, {"a": 2, "b": "x"}]`)
-	wants(t, out, "array of 2 values", ".[].a", ".[].b", "in 1 of 2")
+	wants(t, out, "array of 2 objects", ".[].a", ".[].b", "in 1 of 2")
 }
 
 func TestJSONLines(t *testing.T) {

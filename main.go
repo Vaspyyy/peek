@@ -76,6 +76,13 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 		defer f.Close()
 		r = bufio.NewReaderSize(f, 1<<20)
 	}
+	if bom, _ := r.Peek(3); bytes.Equal(bom, []byte("\xef\xbb\xbf")) {
+		r.Discard(3) // a byte order mark isn't content
+	}
+	maxStr, maxElems, maxKeys = defStr, defElems, defKeys
+	if o.budget == 0 { // no limit: values in full too
+		maxStr, maxElems, maxKeys = 1<<30, 1<<30, 1<<30
+	}
 	sample, _ := r.Peek(64 << 10)
 	kind := o.kind
 	if kind == "" {
@@ -83,6 +90,14 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 	}
 	var next []string
 	code = 0
+	if kind != "text" && kind != "binary" && (o.pattern != "" || o.tail > 0) {
+		fmt.Fprintf(out, "peek: -g and -t are for text, and %s is %s (--as text reads it as text)\n", name, strings.ToUpper(kind))
+		return 2
+	}
+	var counted *countReader
+	if size < 0 && (kind == "csv" || kind == "tsv") {
+		counted = &countReader{r: r} // stdin: the size is known once it's read
+	}
 	switch kind {
 	case "binary":
 		fmt.Fprintf(out, "peek: %s  binary, %s%s\n", name, sizeOr(size), magic(sample))
@@ -97,7 +112,16 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 		} else if delim == 0 {
 			delim = ','
 		}
-		if err := renderTable(out, name, r, delim, sizeFrom(size, sample), o.budget); err != nil {
+		var in io.Reader = r
+		if counted != nil {
+			in = counted
+		}
+		if err := renderTable(out, name, in, delim, func() int64 {
+			if counted != nil {
+				return counted.n
+			}
+			return size
+		}, o.budget); err != nil {
 			fmt.Fprintf(out, "peek: %s: %v\n", name, err)
 			return 2
 		}
@@ -105,7 +129,7 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 		code = runText(out, name, r, o, &next)
 	}
 	for i, n := range next {
-		if i == 2 {
+		if i == 2 || o.file == "-" { // a hint about stdin can't be run as printed
 			break
 		}
 		fmt.Fprintln(out, n)
@@ -120,11 +144,16 @@ func sizeOr(n int64) string {
 	return sizeText(n)
 }
 
-func sizeFrom(n int64, sample []byte) int64 {
-	if n < 0 {
-		return int64(len(sample))
-	}
-	return n
+// countReader counts the bytes read through it.
+type countReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // detect names the kind of a file by its extension, else by its content.
@@ -156,12 +185,30 @@ func detect(file string, sample []byte) string {
 		if len(lines) >= 2 && json.Valid(lines[0]) && json.Valid(lines[1]) {
 			return "jsonl"
 		}
-		return "json"
+		if jsonPrefix(t) {
+			return "json"
+		}
+		// "[10:00:00] INFO", "[ 50%] Building": text that starts like JSON
 	}
 	if sniffDelim(sample) != 0 {
 		return "csv"
 	}
 	return "text"
+}
+
+// jsonPrefix tells whether b is JSON as far as it goes (it may be cut off).
+func jsonPrefix(b []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	for {
+		_, err := dec.Token()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			var se *json.SyntaxError
+			return !errors.As(err, &se)
+		}
+	}
 }
 
 func nonBlankLines(b []byte, n int) [][]byte {
@@ -203,6 +250,9 @@ func runJSON(w io.Writer, name string, r io.Reader, o options, size int64, next 
 		size = int64(len(data))
 	}
 	root, err := parseJSON(data)
+	if errors.Is(err, errMulti) { // one value after another: JSON Lines with long lines
+		return runJSONL(w, name, bytes.NewReader(data), o, size, next)
+	}
 	if err != nil {
 		fmt.Fprintf(w, "peek: %s  not valid JSON: %v\n", name, err)
 		return 2
@@ -217,8 +267,8 @@ func runJSON(w io.Writer, name string, r io.Reader, o options, size int64, next 
 		fmt.Fprintf(w, "peek: %v\n", err)
 		return 2
 	}
-	got, why := selectPath([]*node{root}, steps)
-	return showSelection(w, name, formatPath(steps), got, why, o.budget, next)
+	got, why, missed := selectPath([]*node{root}, steps)
+	return showSelection(w, name, formatPath(steps), got, why, missed, o.budget, next)
 }
 
 // describe is what a value is: "object with 4 keys", "array of 12 values".
@@ -227,7 +277,18 @@ func describe(n *node) string {
 	case kObject:
 		return fmt.Sprintf("object with %s", plural(len(n.keys), "key"))
 	case kArray:
-		return fmt.Sprintf("array of %s", plural(len(n.vals), "value"))
+		what := "value"
+		if len(n.vals) > 0 {
+			k := n.vals[0].kind
+			same := true
+			for _, v := range n.vals {
+				same = same && v.kind == k
+			}
+			if same {
+				what = kindWords[k][0]
+			}
+		}
+		return fmt.Sprintf("array of %s", plural(len(n.vals), what))
 	}
 	return kindName(n)
 }
@@ -253,7 +314,7 @@ func shapeOf(w io.Writer, name string, st *stat, path string, budget int, next *
 		fmt.Fprintln(w, l)
 	}
 	if hidden > 0 {
-		fmt.Fprintf(w, "… %s deeper (a path shows one part, -b 0 all)\n", plural(hidden, "more path"))
+		fmt.Fprintf(w, "… %s (a path shows one part, -b 0 all)\n", plural(hidden, "more path"))
 	}
 	best := -1 // the shallowest array of objects: its first element is a good look
 	for i, rw := range all {
@@ -267,22 +328,26 @@ func shapeOf(w io.Writer, name string, st *stat, path string, budget int, next *
 }
 
 // showSelection writes what a path selected.
-func showSelection(w io.Writer, name, path string, got []*node, why string, budget int, next *[]string) int {
+func showSelection(w io.Writer, name, path string, got []*node, why string, missed, budget int, next *[]string) int {
 	if got == nil {
 		fmt.Fprintf(w, "peek: %s %s  nothing there: %s\n", name, path, why)
 		return 1
+	}
+	note := ""
+	if missed > 0 {
+		note = fmt.Sprintf(" (%s along the way had nothing there)", plural(missed, "value"))
 	}
 	if len(got) == 1 {
 		v := got[0]
 		lines := pretty(v)
 		if budget <= 0 || len(lines) <= budget-1 || v.kind != kObject && v.kind != kArray {
-			fmt.Fprintf(w, "peek: %s %s  %s\n", name, path, describe(v))
+			fmt.Fprintf(w, "peek: %s %s  %s%s\n", name, path, describe(v), note)
 			for _, l := range lines {
 				fmt.Fprintln(w, l)
 			}
 			return 0
 		}
-		fmt.Fprintf(w, "peek: %s %s  %s, too long to print (%s): its shape\n", name, path, describe(v), plural(len(lines), "line"))
+		fmt.Fprintf(w, "peek: %s %s  %s, too long to print (%s): its shape%s\n", name, path, describe(v), plural(len(lines), "line"), note)
 		p := path
 		if p == "." {
 			p = ""
@@ -291,7 +356,7 @@ func showSelection(w io.Writer, name, path string, got []*node, why string, budg
 		return 0
 	}
 	if allScalar(got) && len(got) <= listUpTo && (budget <= 0 || len(got) <= budget-1) {
-		fmt.Fprintf(w, "peek: %s %s  %s\n", name, path, plural(len(got), "value"))
+		fmt.Fprintf(w, "peek: %s %s  %s%s\n", name, path, plural(len(got), "value"), note)
 		for _, v := range got {
 			fmt.Fprintln(w, scalarJSON(v, maxStr))
 		}
@@ -301,7 +366,7 @@ func showSelection(w io.Writer, name, path string, got []*node, why string, budg
 	for _, v := range got {
 		st.add(v)
 	}
-	fmt.Fprintf(w, "peek: %s %s  %s: %s\n", name, path, plural(len(got), "value"), st.typeLabel())
+	fmt.Fprintf(w, "peek: %s %s  %s: %s%s\n", name, path, plural(len(got), "value"), st.typeLabel(), note)
 	if !st.isContainer() {
 		fmt.Fprintln(w, st.detail(0))
 		return 0
@@ -348,7 +413,7 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 				if steps == nil && o.arg == "" {
 					st.add(rec)
 				} else {
-					got, why := selectPath([]*node{rec}, steps)
+					got, why, _ := selectPath([]*node{rec}, steps)
 					if got == nil {
 						missing++
 						if firstWhy == "" {
@@ -385,7 +450,9 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	}
 	if o.arg == "" {
 		fmt.Fprintln(w, head)
-		shapeOf(w, name, st, "", less(o.budget, 1), next)
+		if records > 0 {
+			shapeOf(w, name, st, "", less(o.budget, 1), next)
+		}
 		return 0
 	}
 	path := formatPath(steps)
@@ -454,6 +521,9 @@ func runText(w io.Writer, name string, r io.Reader, o options, next *[]string) i
 	case o.pattern != "":
 		return renderHits(w, name, t, o.pattern, o.budget)
 	case o.arg != "":
+		if t.to > t.lines && t.from <= t.lines { // the range as far as the text goes
+			what = fmt.Sprintf("lines %d-%d", t.from, t.lines)
+		}
 		return renderLines(w, name, t, what)
 	case o.tail > 0:
 		t.kept = t.lastLines()
@@ -543,7 +613,8 @@ func parse(args []string, stdinTTY bool) (options, int, string) {
 	case len(pos) == 0:
 		o.file = "-"
 	case len(pos) == 1 && !stdinTTY && looksLikePath(pos[0]):
-		if _, err := os.Stat(pos[0]); err != nil {
+		// a jq path for stdin, unless it names a file (".env")
+		if fi, err := os.Stat(pos[0]); err != nil || fi.IsDir() {
 			o.file, o.arg = "-", pos[0]
 		} else {
 			o.file = pos[0]
@@ -561,7 +632,11 @@ func parse(args []string, stdinTTY bool) (options, int, string) {
 	return o, 0, ""
 }
 
-func looksLikePath(s string) bool { return strings.HasPrefix(s, ".") || strings.HasPrefix(s, "[") }
+// looksLikePath: a jq path starts with . or [ and has no slash, which a file
+// path like ./data.json has.
+func looksLikePath(s string) bool {
+	return (strings.HasPrefix(s, ".") || strings.HasPrefix(s, "[")) && !strings.Contains(s, "/")
+}
 
 func wantsColor(f *os.File) bool {
 	return term.IsTerminal(int(f.Fd())) && os.Getenv("NO_COLOR") == ""

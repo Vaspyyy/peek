@@ -25,7 +25,7 @@ func sniffDelim(sample []byte) rune {
 			break
 		}
 	}
-	if len(rows) < 2 {
+	if len(rows) < 3 { // two lines with a comma each aren't a table yet
 		return 0
 	}
 	for _, d := range []rune{'\t', ',', ';', '|'} {
@@ -41,6 +41,14 @@ func sniffDelim(sample []byte) rune {
 		ok := n >= 2
 		for _, rec := range recs {
 			ok = ok && len(rec) == n
+		}
+		// a column that is empty in every row ("SELECT 1;") isn't one
+		for i := 0; ok && i < n; i++ {
+			filled := false
+			for _, rec := range recs {
+				filled = filled || strings.TrimSpace(rec[i]) != ""
+			}
+			ok = filled
 		}
 		if ok {
 			return d
@@ -59,7 +67,7 @@ func cellNode(c string) *node {
 	case t == "true" || t == "false" || t == "TRUE" || t == "FALSE" || t == "True" || t == "False":
 		return &node{kind: kBool, b: strings.EqualFold(t, "true")}
 	}
-	if _, err := strconv.ParseFloat(t, 64); err == nil && !strings.ContainsAny(t, "xXnN") {
+	if _, err := strconv.ParseFloat(t, 64); err == nil && !strings.ContainsAny(t, "xXnN") && !leadingZero(t) {
 		return &node{kind: kNumber, text: t}
 	}
 	return &node{kind: kString, text: c}
@@ -67,8 +75,14 @@ func cellNode(c string) *node {
 
 func isNumber(c string) bool { return cellNode(c).kind == kNumber }
 
+// leadingZero: "01234" is a code (a zip, an ID), not the number 1234.
+func leadingZero(t string) bool {
+	t = strings.TrimLeft(t, "+-")
+	return len(t) > 1 && t[0] == '0' && t[1] >= '0' && t[1] <= '9'
+}
+
 // renderTable writes the card of a CSV or TSV file.
-func renderTable(w io.Writer, name string, r io.Reader, delim rune, size int64, budget int) error {
+func renderTable(w io.Writer, name string, r io.Reader, delim rune, size func() int64, budget int) error {
 	cr := csv.NewReader(r)
 	cr.Comma = delim
 	cr.LazyQuotes = true
@@ -126,7 +140,7 @@ func renderTable(w io.Writer, name string, r io.Reader, delim rune, size int64, 
 	if header {
 		fmt.Fprint(w, " (with a header)")
 	}
-	fmt.Fprintf(w, ", %s", sizeText(size))
+	fmt.Fprintf(w, ", %s", sizeText(size()))
 	if ragged > 0 {
 		fmt.Fprintf(w, "; %s with another number of fields", plural(ragged, "row"))
 	}

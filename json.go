@@ -93,6 +93,9 @@ func decodeFrom(dec *json.Decoder, t json.Token) (*node, error) {
 	return nil, fmt.Errorf("unexpected token %v", t)
 }
 
+// errMulti: the data has more than one JSON value, one after another.
+var errMulti = errors.New("more than one JSON value")
+
 // parseJSON reads data as exactly one JSON document.
 func parseJSON(data []byte) (*node, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -102,7 +105,7 @@ func parseJSON(data []byte) (*node, error) {
 		return nil, jsonError(data, dec, err)
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, fmt.Errorf("more than one JSON value (at byte %d); JSON Lines?", dec.InputOffset())
+		return nil, fmt.Errorf("%w (at byte %d)", errMulti, dec.InputOffset())
 	}
 	return n, nil
 }
@@ -263,42 +266,45 @@ func keySeg(k string, first bool) string {
 	if ident {
 		return "." + k
 	}
-	q, _ := json.Marshal(k)
+	q := jsonQuote(k)
 	if first {
-		return ".[" + string(q) + "]"
+		return ".[" + q + "]"
 	}
-	return "[" + string(q) + "]"
+	return "[" + q + "]"
 }
 
 // selectPath applies steps to roots. It returns the values reached, or why
 // none were: where the path stopped.
-func selectPath(roots []*node, steps []step) ([]*node, string) {
+func selectPath(roots []*node, steps []step) ([]*node, string, int) {
 	cur := roots
+	missed := 0 // values along the way that the next step found nothing in
 	for k, s := range steps {
 		var next []*node
 		var why string
+		before := 0
 		for _, n := range cur {
+			before = len(next)
 			switch s.kind {
 			case 0:
 				if n.kind != kObject {
 					why = fmt.Sprintf("%s is %s, not an object", formatPath(steps[:k]), kindName(n))
-					continue
+					break
 				}
-				found := false
+				found := -1 // the last one, as in jq, when a key repeats
 				for i, key := range n.keys {
 					if key == s.key {
-						next = append(next, n.vals[i])
-						found = true
-						break
+						found = i
 					}
 				}
-				if !found {
+				if found >= 0 {
+					next = append(next, n.vals[found])
+				} else {
 					why = fmt.Sprintf("no key %q in %s; its keys: %s", s.key, formatPath(steps[:k]), keyList(n.keys, 12))
 				}
 			case 1:
 				if n.kind != kArray {
 					why = fmt.Sprintf("%s is %s, not an array", formatPath(steps[:k]), kindName(n))
-					continue
+					break
 				}
 				i := s.index
 				if i < 0 {
@@ -306,26 +312,30 @@ func selectPath(roots []*node, steps []step) ([]*node, string) {
 				}
 				if i < 0 || i >= len(n.vals) {
 					why = fmt.Sprintf("%s has %s", formatPath(steps[:k]), plural(len(n.vals), "element"))
-					continue
+					break
 				}
 				next = append(next, n.vals[i])
 			default:
 				if n.kind != kArray && n.kind != kObject {
 					why = fmt.Sprintf("%s is %s, which [] can't go into", formatPath(steps[:k]), kindName(n))
-					continue
+					break
 				}
 				next = append(next, n.vals...)
+				before = -1 // an empty array isn't a miss
+			}
+			if len(next) == before {
+				missed++
 			}
 		}
 		if len(next) == 0 {
 			if why == "" {
 				why = fmt.Sprintf("%s is empty", formatPath(steps[:k]))
 			}
-			return nil, why
+			return nil, why, missed
 		}
 		cur = next
 	}
-	return cur, ""
+	return cur, "", missed
 }
 
 func keyList(keys []string, n int) string {
@@ -351,12 +361,24 @@ func kindName(n *node) string {
 	return "null"
 }
 
-// Limits for printing a value as JSON.
+// Limits for printing a value as JSON; run lifts them for -b 0.
 const (
-	maxStr   = 200 // characters of a string
-	maxElems = 20  // elements of an array before it's cut to its first 10
-	maxKeys  = 60  // keys of an object before it's cut to its first 40
+	defStr   = 200 // characters of a string
+	defElems = 20  // elements of an array before it's cut to its first 10
+	defKeys  = 60  // keys of an object before it's cut to its first 40
 )
+
+var maxStr, maxElems, maxKeys = defStr, defElems, defKeys
+
+// jsonQuote writes s as a JSON string, without escaping & < > as Go's
+// encoder does for HTML.
+func jsonQuote(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
+}
 
 // pretty writes n as lines of indented JSON, with long strings clipped and
 // long arrays and objects cut.
@@ -382,8 +404,7 @@ func pretty(n *node) []string {
 				show = maxKeys * 2 / 3
 			}
 			for i := 0; i < show; i++ {
-				q, _ := json.Marshal(n.keys[i])
-				cur.WriteString(ind + "  " + string(q) + ": ")
+				cur.WriteString(ind + "  " + jsonQuote(n.keys[i]) + ": ")
 				walk(n.vals[i], ind+"  ")
 				if i < len(n.keys)-1 {
 					cur.WriteString(",")
@@ -461,8 +482,7 @@ func scalarJSON(n *node, limit int) string {
 			s = string(r[:limit])
 			extra = fmt.Sprintf(" … +%s chars", count(len(r)-limit))
 		}
-		q, _ := json.Marshal(s)
-		return string(q) + extra
+		return jsonQuote(s) + extra
 	case kNumber:
 		return n.text
 	case kBool:

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
-	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +15,7 @@ const (
 	strCap    = 200 // distinct strings counted per path; past it, "many"
 	strKey    = 80  // characters of a long string shown
 	fieldCap  = 500 // keys tracked per path; past it, a note says so
+	maxDepth  = 64  // levels of paths listed
 	mapAt     = 40  // an object with more keys than this is read as a map
 	listUpTo  = 40  // values listed one per line when a path selects several
 	topValues = 6   // repeated values counted on a line
@@ -46,14 +47,15 @@ type stat struct {
 
 	// strings
 	strs    map[string]int
-	strOver bool
+	strOver bool     // more than strCap distinct: counts are estimates (space-saving)
 	order   []string // distinct strings in the order seen (up to strCap)
 
 	// numbers
-	nums     int
-	min, max float64
-	allInt   bool
-	numTexts map[string]int // up to topValues+1 distinct texts
+	nums             int
+	min, max         float64
+	minText, maxText string // as written, so ranges aren't rounded
+	allInt           bool
+	numTexts         map[string]int // up to topValues+1 distinct texts
 
 	// booleans
 	t, f int
@@ -114,16 +116,35 @@ func (s *stat) add(n *node) {
 			s.strs[key] = 1
 			s.order = append(s.order, key)
 		} else {
+			// space-saving: the least counted string makes room, and the
+			// new one starts above its count, so a string that becomes
+			// frequent late still rises to the top
 			s.strOver = true
+			low := 0
+			for i, k := range s.order {
+				if s.strs[k] < s.strs[s.order[low]] {
+					low = i
+				}
+			}
+			c := s.strs[s.order[low]]
+			delete(s.strs, s.order[low])
+			s.order[low] = key
+			s.strs[key] = c + 1
 		}
 	case kNumber:
 		v, _ := strconv.ParseFloat(n.text, 64)
 		isInt := !strings.ContainsAny(n.text, ".eE")
 		if s.nums == 0 {
 			s.min, s.max, s.allInt = v, v, isInt
+			s.minText, s.maxText = n.text, n.text
 			s.numTexts = map[string]int{}
 		} else {
-			s.min, s.max = math.Min(s.min, v), math.Max(s.max, v)
+			if numLess(n.text, s.minText, v, s.min) {
+				s.min, s.minText = v, n.text
+			}
+			if numLess(s.maxText, n.text, s.max, v) {
+				s.max, s.maxText = v, n.text
+			}
 			s.allInt = s.allInt && isInt
 		}
 		s.nums++
@@ -137,6 +158,17 @@ func (s *stat) add(n *node) {
 			s.f++
 		}
 	}
+}
+
+// numLess compares two numbers, exactly when their float values are equal
+// (19-digit IDs are, as float64).
+func numLess(a, b string, av, bv float64) bool {
+	if av != bv {
+		return av < bv
+	}
+	x, ok1 := new(big.Float).SetPrec(512).SetString(a)
+	y, ok2 := new(big.Float).SetPrec(512).SetString(b)
+	return ok1 && ok2 && x.Cmp(y) < 0
 }
 
 // strKeyOf is how a string is counted: itself, or for a long one its start
@@ -188,6 +220,12 @@ type row struct {
 // rows lists the paths under s, depth first, in the order keys were seen.
 func rows(s *stat, path string, depth int, parentObjs int, out *[]row) {
 	*out = append(*out, row{path: pathOr(path), typ: s.typeLabel(), detail: s.detail(parentObjs), depth: depth})
+	if depth >= maxDepth { // deeper paths would only grow (and cost) without end
+		if s.isContainer() {
+			(*out)[len(*out)-1].detail += fmt.Sprintf("; nested deeper than %d levels (a path shows it)", maxDepth)
+		}
+		return
+	}
 	if s.objs > 0 && !s.isMap() {
 		for _, k := range s.keys {
 			rows(s.fields[k], path+keySeg(k, path == ""), depth+1, s.objs, out)
@@ -231,9 +269,21 @@ func (s *stat) plainObjects() bool {
 	return s.types[kObject] == s.n && !s.isMap()
 }
 
-// isMap: every object here has more than mapAt keys, so they're shown as
+// isMap: every object here has more than mapAt keys and all their values
+// have one kind (IDs to records, names to strings), so they're shown as
 // maps (their values merged under []) rather than by field.
-func (s *stat) isMap() bool { return s.maps > 0 && s.maps == s.objs }
+func (s *stat) isMap() bool {
+	if s.maps == 0 || s.maps != s.objs || s.mapVals == nil {
+		return false
+	}
+	kinds := 0 // a map's values have one kind; a wide record's are mixed
+	for _, c := range s.mapVals.types {
+		if c > 0 {
+			kinds++
+		}
+	}
+	return kinds == 1
+}
 
 var kindWords = [nKinds][2]string{
 	{"object", "objects"}, {"array", "arrays"}, {"string", "strings"},
@@ -360,9 +410,19 @@ func (s *stat) strDetail() string {
 	}
 	many := count(distinct) + " distinct"
 	if s.strOver {
+		// counts past the cap are estimates; show the strings that repeat
 		many = fmt.Sprintf("over %s distinct", count(strCap))
-	}
-	if top := s.topStrings(3); distinct < n && s.repeated(3) {
+		var hot []string
+		for _, v := range s.byCount() {
+			if s.strs[v] < 2 || len(hot) == 3 {
+				break
+			}
+			hot = append(hot, fmt.Sprintf("%s ×%s", quote(v, 30), count(s.strs[v])))
+		}
+		if len(hot) > 0 {
+			return many + ", most often about " + strings.Join(hot, ", ")
+		}
+	} else if top := s.topStrings(3); distinct < n && s.repeated(3) {
 		return many + ", most often " + top
 	}
 	return many + ", like " + quoteList(s.order[:min(2, len(s.order))])
@@ -414,14 +474,7 @@ func (s *stat) numDetail() string {
 		}
 		return strings.Join(parts, ", ")
 	}
-	return fmt.Sprintf("%s to %s", num(s.min, s.allInt), num(s.max, s.allInt))
-}
-
-func num(v float64, isInt bool) string {
-	if isInt && math.Abs(v) < 1e15 {
-		return strconv.FormatInt(int64(v), 10)
-	}
-	return strconv.FormatFloat(v, 'g', 6, 64)
+	return fmt.Sprintf("%s to %s", s.minText, s.maxText)
 }
 
 func quote(s string, n int) string {
@@ -458,24 +511,40 @@ func clipRunes(s string, n int) string {
 func card(all []row, budget int) (lines []string, hidden int) {
 	shown := all
 	if budget > 0 && len(all) > budget {
-		maxDepth, minDepth := 0, all[0].depth
+		// every level that fits whole, then as much of the next as fits,
+		// in the order of the file
+		deepest, minDepth := 0, all[0].depth
 		for _, r := range all {
-			maxDepth = max(maxDepth, r.depth)
+			deepest = max(deepest, r.depth)
 			minDepth = min(minDepth, r.depth)
 		}
-		for d := maxDepth; d >= minDepth; d-- {
-			shown = shown[:0:0]
+		full := minDepth - 1
+		for d := minDepth; d <= deepest; d++ {
+			n := 0
 			for _, r := range all {
 				if r.depth <= d {
-					shown = append(shown, r)
+					n++
 				}
 			}
-			if len(shown) <= budget || d == minDepth {
+			if n > budget {
 				break
 			}
+			full = d
 		}
-		if len(shown) > budget {
-			shown = shown[:budget]
+		room := budget
+		for _, r := range all {
+			if r.depth <= full {
+				room--
+			}
+		}
+		shown = shown[:0:0]
+		for _, r := range all {
+			if r.depth <= full || r.depth == full+1 && room > 0 {
+				if r.depth == full+1 {
+					room--
+				}
+				shown = append(shown, r)
+			}
 		}
 		hidden = len(all) - len(shown)
 	}

@@ -60,7 +60,7 @@ last lines ...
 next: peek run.log 1205-1225   the lines around the first error
 ```
 
-Lines are grouped by template (numbers and IDs as `<n>`), so repeated lines collapse into one with a count. Errors and warnings go by the level the logger wrote (`ERROR`, `[main/WARN]`, `level=INFO`) or else by words like `failed`, `exception`, `FAIL`, `warning`. Long lines show their start and end (the end often has the reason).
+Lines are grouped by template (numbers and IDs as `<n>`), so repeated lines collapse into one with a count. Errors and warnings go by the level the line starts with or the logger wrote (`error:`, `ERROR`, `[main/WARN]`, `level=info`) or else by words and names like `failed`, `FAIL`, `ValueError`, `Caused by: …Exception`, `warning`; passing test lines (`--- PASS`, `ok  pkg`) never count. Long lines show their start and end (the end often has the reason).
 
 | Want | Command |
 | --- | --- |
@@ -73,6 +73,7 @@ A short text is shown whole. For a build or test run, run it through `crux` inst
 
 ## Other
 
-- `--as json|jsonl|csv|tsv|text` when the extension misleads.
+- `--as json|jsonl|csv|tsv|text` when the extension misleads (`-g` and `-t` only work on text).
+- With `-b 0` nothing is clipped: whole values, whole strings.
 - A binary file is named (PNG, gzip, ELF, …), not printed.
 - Exit code 1 when a path, pattern or line range matched nothing; 2 for bad input.

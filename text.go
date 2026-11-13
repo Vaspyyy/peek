@@ -20,7 +20,7 @@ var (
 	// a level a logger or compiler wrote, which wins over the words in the
 	// message: "warning: x failed" (gcc, cargo), "level=info", "[main/WARN]"
 	reLead  = regexp.MustCompile(`(?i)^\s*(error|err|fatal|panic|warning|warn|info|note|notice|debug|trace|hint|help)(\[[^\]]*\])?:`)
-	reKV    = regexp.MustCompile(`(?i)\b(?:level|lvl|severity)"?\s*[=:]\s*"?([a-z]+)`)
+	reKV    = regexp.MustCompile(`(?i)\b(?:level|lvl|severity)"?\s*[=:]\s*"?([a-z]+|[1-6]0)\b`)
 	reLevel = regexp.MustCompile(`\b(TRACE|TRC|DEBUG|DBG|FINE|INFO|INF|NOTICE|WARN|WARNING|WRN|ERROR|ERR|FATAL|FTL|CRITICAL|CRIT|SEVERE|PANIC)\b`)
 	// lines of passing tests, whatever their names say ("--- PASS: TestError")
 	rePass = regexp.MustCompile(`^\s*(ok\s|--- PASS|=== (RUN|PAUSE|CONT|NAME)\b|PASS\s*$|test .* \.\.\. ok\s*$)`)
@@ -33,7 +33,7 @@ var (
 	reNotFail  = regexp.MustCompile(`(?i)\bfail-(fast|safe|over)\b|\bfailover\b`)
 	reFailing  = regexp.MustCompile(`\b[1-9]\d* failing\b`)
 	reCaused   = regexp.MustCompile(`^\s*Caused by: `)
-	reError    = regexp.MustCompile(`(?i)\b(errors?|fatal|panic(ked)?|exceptions?|traceback|fail(s|ed|ures?)?|segfault)\b|^not ok\b`)
+	reError    = regexp.MustCompile(`(?i)\b(errors?|fatal|panic(ked)?|exceptions?|traceback|fail(s|ed|ures?)?|segfault|segmentation fault)\b|^not ok\b|^\s*[✕✗]\s`)
 	reNotError = regexp.MustCompile(`(?i)\b(0|no|zero)( \w+)? (errors?|failures?|failed)\b|\b(errors?|failures?|failed)[:=] ?0\b`)
 	reWarn     = regexp.MustCompile(`(?i)\bwarn(ing|ings|s)?\b`)
 	reNotWarn  = regexp.MustCompile(`(?i)\b(0|no|zero) warn(ing|ings|s)?\b|\bwarn(ing|ings|s)?[:=] ?0\b`)
@@ -178,11 +178,18 @@ func severity(line string) int {
 	if m := reLead.FindStringSubmatch(line); m != nil {
 		return levelOf(m[1])
 	}
-	if m := reKV.FindStringSubmatch(line); m != nil && knownLevel(m[1]) {
-		return levelOf(m[1])
+	// a level field ("level=info") or a level word ("ERROR"): the earlier
+	// one, so "ERROR failed to set level=debug" is an error
+	kv := reKV.FindStringSubmatchIndex(line)
+	if kv != nil && !knownLevel(line[kv[2]:kv[3]]) {
+		kv = nil
 	}
-	if m := reLevel.FindString(line); m != "" {
-		return levelOf(m)
+	lv := reLevel.FindStringIndex(line)
+	switch {
+	case kv != nil && (lv == nil || kv[0] < lv[0]):
+		return levelOf(line[kv[2]:kv[3]])
+	case lv != nil:
+		return levelOf(line[lv[0]:lv[1]])
 	}
 	if m := reLocated.FindStringSubmatch(line); m != nil {
 		// "path:line[:col]: message": a level word there says what it is
@@ -291,7 +298,8 @@ func inName(line string, a, b int) bool {
 func knownLevel(w string) bool {
 	switch strings.ToLower(w) {
 	case "trace", "trc", "debug", "dbg", "fine", "info", "inf", "notice", "warn", "warning", "wrn",
-		"error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert":
+		"error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert",
+		"10", "20", "30", "40", "50", "60": // pino's numbers
 		return true
 	}
 	return false
@@ -300,9 +308,9 @@ func knownLevel(w string) bool {
 // levelOf is the severity of a level's name.
 func levelOf(level string) int {
 	switch strings.ToLower(level) {
-	case "warn", "warning", "wrn":
+	case "warn", "warning", "wrn", "40":
 		return 1
-	case "error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert":
+	case "error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert", "50", "60":
 		return 2
 	}
 	return 0

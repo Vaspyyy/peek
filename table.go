@@ -11,10 +11,10 @@ import (
 
 // sniffDelim finds the delimiter that splits the first lines into the same
 // number (two or more) of fields, or 0.
-func sniffDelim(sample []byte) rune { return sniffDelimN(sample, 3) }
-
-// sniffDelimN is sniffDelim needing at least minRows rows: three to call
-// unknown text a table, one for a file that is a table by its name.
+// sniffDelimN finds the delimiter that splits the first lines (at least
+// minRows of them) into the same number, two or more, of fields: several
+// rows to call unknown text a table, one for a file that is a table by its
+// name, where one ragged row doesn't stop it either.
 func sniffDelimN(sample []byte, minRows int) rune {
 	lines := bytes.Split(sample, []byte("\n"))
 	if len(lines) > 1 && len(lines[len(lines)-1]) > 0 {
@@ -56,6 +56,30 @@ func sniffDelimN(sample []byte, minRows int) rune {
 		}
 		if ok {
 			return d
+		}
+	}
+	if minRows == 1 { // a .csv: the delimiter that fits most rows
+		best, bestRows := rune(0), 0
+		for _, d := range []rune{'\t', ',', ';', '|'} {
+			r := csv.NewReader(bytes.NewReader(bytes.Join(rows, []byte("\n"))))
+			r.Comma = d
+			r.LazyQuotes = true
+			r.FieldsPerRecord = -1
+			recs, _ := r.ReadAll()
+			counts := map[int]int{}
+			for _, rec := range recs {
+				if len(rec) >= 2 {
+					counts[len(rec)]++
+				}
+			}
+			for _, c := range counts {
+				if c > bestRows {
+					best, bestRows = d, c
+				}
+			}
+		}
+		if bestRows*2 > len(rows) {
+			return best
 		}
 	}
 	return 0

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -418,11 +419,72 @@ func TestEmptyStdinWithAPath(t *testing.T) {
 	// peek() takes "" for a terminal; this needs an empty pipe
 	var b bytes.Buffer
 	w := bufio.NewWriter(&b)
-	code := run([]string{".missing.json"}, strings.NewReader(""), false, w)
+	code := run([]string{".missing"}, strings.NewReader(""), false, w)
 	w.Flush()
 	if code != 2 || !strings.Contains(b.String(), "nothing came on stdin") {
 		t.Errorf("exit %d:\n%s", code, b.String())
 	}
+}
+
+// The cases below are from Sonnet 5.5's re-check of cd284e6.
+
+func TestLevelOrderAndMore(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want int
+	}{
+		{"ERROR failed to set level=debug", 2},
+		{"ts=1 level=info msg=\"set ERROR handler\"", 0},
+		{`{"level":50,"msg":"boom"}`, 2},
+		{`{"level":40,"msg":"slow"}`, 1},
+		{`{"level":30,"msg":"request failed once"}`, 0},
+		{"Segmentation fault (core dumped)", 2},
+		{"  ✕ adds 1 + 2 (5 ms)", 2},
+	} {
+		if got := severity(c.line); got != c.want {
+			t.Errorf("severity(%q) = %d, want %d", c.line, got, c.want)
+		}
+	}
+}
+
+func TestShortTextIsNoTable(t *testing.T) {
+	p := file(t, "short.py", "import os, sys\nimport re, json\nprint(1, 2)\n")
+	out, _ := peek(t, "", p)
+	lacks(t, out, " rows, ")
+	out, _ = peek(t, "a, b\nc, d\ne, f\n")
+	lacks(t, out, " rows, ")
+}
+
+func TestRaggedCSVKeepsDelimiter(t *testing.T) {
+	p := file(t, "semi.csv", "a;b;c\n1;2;3\n4;5\n6;7;8\n9;9;9\n")
+	out, _ := peek(t, "", p)
+	wants(t, out, "separated by ';'", "3 columns", "1 row with another number of fields")
+}
+
+func TestDotfilesAreFiles(t *testing.T) {
+	var b bytes.Buffer
+	w := bufio.NewWriter(&b)
+	code := run([]string{".eslintrc-missing.json"}, strings.NewReader(`{"a":1}`), false, w)
+	w.Flush()
+	if code != 2 || !strings.Contains(b.String(), "no such file") {
+		t.Errorf("missing dotfile: exit %d:\n%s", code, b.String())
+	}
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Mkdir(".cache", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	code = run([]string{".cache"}, strings.NewReader(`{"a":1}`), false, w)
+	w.Flush()
+	if code != 2 || !strings.Contains(b.String(), "is a folder") {
+		t.Errorf("folder: exit %d:\n%s", code, b.String())
+	}
+}
+
+func TestEmptyObjectInPath(t *testing.T) {
+	out, _ := peek(t, `{"a":[{}]}`, ".a[].zz")
+	wants(t, out, `no key "zz" in .a[], an empty object`)
 }
 
 func TestEmptyJSONLines(t *testing.T) {

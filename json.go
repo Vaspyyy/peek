@@ -300,6 +300,9 @@ func selectPath(roots []*node, steps []step) ([]*node, string, int) {
 					next = append(next, n.vals[found])
 				} else {
 					why = fmt.Sprintf("no key %q in %s; its keys: %s", s.key, formatPath(steps[:k]), keyList(n.keys, 12))
+					if len(n.keys) == 0 {
+						why = fmt.Sprintf("no key %q in %s, an empty object", s.key, formatPath(steps[:k]))
+					}
 				}
 			case 1:
 				if n.kind != kArray {

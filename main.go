@@ -20,7 +20,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.2"
+const version = "0.1.3"
 
 const defaultBudget = 60
 
@@ -200,10 +200,23 @@ func detect(file string, sample []byte) string {
 		}
 		// "[10:00:00] INFO", "[ 50%] Building": text that starts like JSON
 	}
-	if sniffDelim(sample) != 0 && !looksLikeLog(sample) {
+	if codeExt[strings.ToLower(filepath.Ext(file))] {
+		return "text" // a .py with a few commas isn't a table
+	}
+	if sniffDelimN(sample, 5) != 0 && !looksLikeLog(sample) {
 		return "csv"
 	}
 	return "text"
+}
+
+// codeExt are extensions of code and prose, which are text whatever their
+// commas look like.
+var codeExt = map[string]bool{}
+
+func init() {
+	for _, e := range strings.Fields(".py .md .go .rs .js .mjs .cjs .ts .tsx .jsx .java .kt .c .h .cc .cpp .hpp .cs .rb .php .lua .gd .sh .bash .zsh .fish .swift .scala .sql .html .css .scss .xml .yaml .yml .toml .ini .cfg .conf .env .rst .tex .vue .svelte .nix .el .vim .ex .exs .erl .hs .ml .r .pl .ps1 .bat .mk .cmake .gradle .proto") {
+		codeExt[e] = true
+	}
 }
 
 // looksLikeLog: most of the first lines carry a log level ("- INFO -",
@@ -659,11 +672,16 @@ func parse(args []string, stdinTTY bool) (options, int, string) {
 	case len(pos) == 0:
 		o.file = "-"
 	case len(pos) == 1 && !stdinTTY && looksLikePath(pos[0]):
-		// a jq path for stdin, unless it names a file (".env")
-		if fi, err := os.Stat(pos[0]); err != nil || fi.IsDir() {
-			o.file, o.arg = "-", pos[0]
-		} else {
+		// a jq path for stdin, unless it names a file (".env"), a folder
+		// (".cache"), or a missing file by its look (".eslintrc.json")
+		fi, err := os.Stat(pos[0])
+		switch {
+		case err == nil && (!fi.IsDir() || pos[0] != "."):
 			o.file = pos[0]
+		case err != nil && reDotFile.MatchString(pos[0]):
+			o.file = pos[0]
+		default:
+			o.file, o.arg = "-", pos[0]
 		}
 	case len(pos) == 1:
 		o.file = pos[0]
@@ -677,6 +695,10 @@ func parse(args []string, stdinTTY bool) (options, int, string) {
 	}
 	return o, 0, ""
 }
+
+// reDotFile is a name like ".eslintrc.json": a dotfile with a file's
+// extension, more likely a file than a jq path.
+var reDotFile = regexp.MustCompile(`^\.[\w.-]*\.(json|jsonl|ndjson|csv|tsv|log|txt|out|err|yaml|yml|toml|ini|cfg|conf|xml|md|lock)$`)
 
 // looksLikePath: a jq path starts with . or [ and has no slash, which a file
 // path like ./data.json has.

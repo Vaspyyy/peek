@@ -250,9 +250,9 @@ func TestCSV(t *testing.T) {
 	p = file(t, "t.tsv", "a\tb\n1\t2\n3\t4\n")
 	out, _ = peek(t, "", p)
 	wants(t, out, "TSV, 2 rows, 2 columns (with a header)")
-	p = file(t, "semi", "x;y;z\n1;2;3\n4;5;6\n")
+	p = file(t, "semi", "x;y;z\n1;2;3\n4;5;6\n7;8;9\n1;1;1\n")
 	out, _ = peek(t, "", p)
-	wants(t, out, `CSV (separated by ';'), 2 rows, 3 columns`)
+	wants(t, out, `CSV (separated by ';'), 4 rows, 3 columns`)
 }
 
 func TestBinary(t *testing.T) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math"
 	"sort"
 	"strconv"
@@ -12,7 +13,8 @@ import (
 // Limits for collecting statistics.
 const (
 	strCap    = 200 // distinct strings counted per path; past it, "many"
-	strKey    = 80  // characters of a string kept for counting it
+	strKey    = 80  // characters of a long string shown
+	fieldCap  = 500 // keys tracked per path; past it, a note says so
 	mapAt     = 40  // an object with more keys than this is read as a map
 	listUpTo  = 40  // values listed one per line when a path selects several
 	topValues = 6   // repeated values counted on a line
@@ -23,10 +25,11 @@ type stat struct {
 	n     int // values seen
 	types [nKinds]int
 
-	// objects
-	objs   int
-	keys   []string // in the order they were first seen
-	fields map[string]*stat
+	// objects (all of them, maps included)
+	objs       int
+	keys       []string // in the order they were first seen
+	fields     map[string]*stat
+	fieldsOver bool // more than fieldCap keys: the rest aren't tracked
 
 	// objects read as maps (more than mapAt keys): their values merged
 	maps     int
@@ -64,17 +67,24 @@ func (s *stat) add(n *node) {
 	s.types[n.kind]++
 	switch n.kind {
 	case kObject:
+		// an object with many keys may be a map (IDs to records): its
+		// values are merged too, and it's shown as a map if every object
+		// here is one; its keys count as fields as well, so that a field's
+		// line covers every object the field's path selects
+		s.objs++
 		if len(n.keys) > mapAt {
 			s.addMap(n)
-			return
 		}
-		s.objs++
 		if s.fields == nil {
 			s.fields = map[string]*stat{}
 		}
 		for i, k := range n.keys {
 			f := s.fields[k]
 			if f == nil {
+				if len(s.keys) >= fieldCap {
+					s.fieldsOver = true
+					continue
+				}
 				f = newStat()
 				s.fields[k] = f
 				s.keys = append(s.keys, k)
@@ -97,7 +107,7 @@ func (s *stat) add(n *node) {
 		if s.strs == nil {
 			s.strs = map[string]int{}
 		}
-		key := clipRunes(n.text, strKey) // long strings are counted by their start
+		key := strKeyOf(n.text)
 		if _, ok := s.strs[key]; ok {
 			s.strs[key]++
 		} else if len(s.strs) < strCap {
@@ -129,6 +139,28 @@ func (s *stat) add(n *node) {
 	}
 }
 
+// strKeyOf is how a string is counted: itself, or for a long one its start
+// and a hash of the whole, so that two long strings that differ only at the
+// end count as two.
+func strKeyOf(s string) string {
+	if len(s) <= strKey*4 {
+		return s
+	}
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return clipRunes(s, strKey) + keyMark + strconv.FormatUint(h.Sum64(), 36)
+}
+
+const keyMark = "\x00#"
+
+// shown is the part of a counted string to show.
+func shown(key string) string {
+	if i := strings.Index(key, keyMark); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
 func (s *stat) addMap(n *node) {
 	if s.maps == 0 || len(n.keys) < s.mapMin {
 		s.mapMin = len(n.keys)
@@ -156,12 +188,12 @@ type row struct {
 // rows lists the paths under s, depth first, in the order keys were seen.
 func rows(s *stat, path string, depth int, parentObjs int, out *[]row) {
 	*out = append(*out, row{path: pathOr(path), typ: s.typeLabel(), detail: s.detail(parentObjs), depth: depth})
-	if s.objs > 0 {
+	if s.objs > 0 && !s.isMap() {
 		for _, k := range s.keys {
 			rows(s.fields[k], path+keySeg(k, path == ""), depth+1, s.objs, out)
 		}
 	}
-	if s.maps > 0 {
+	if s.isMap() {
 		p := path + "[]"
 		if path == "" {
 			p = ".[]"
@@ -173,12 +205,12 @@ func rows(s *stat, path string, depth int, parentObjs int, out *[]row) {
 		if path == "" {
 			p = ".[]"
 		}
-		// the elements' own line says nothing the array's doesn't: go
-		// straight to what's in them
+		// for elements that are all plain objects, their own line says
+		// nothing the array's doesn't: go straight to their fields
 		e := s.elem
 		start := len(*out)
 		rows(e, p, depth+1, 0, out)
-		if e.onlyContainers() && len(*out) > start {
+		if e.plainObjects() && len(*out) > start {
 			*out = append((*out)[:start], (*out)[start+1:]...)
 		}
 	}
@@ -193,11 +225,15 @@ func pathOr(p string) string {
 
 func (s *stat) isContainer() bool { return s.types[kObject] > 0 || s.types[kArray] > 0 }
 
-// onlyContainers: every value is an object (not a map) or every value is an
-// array, so the line for it would only repeat its parent's.
-func (s *stat) onlyContainers() bool {
-	return s.types[kObject] == s.n && s.maps == 0 || s.types[kArray] == s.n
+// plainObjects: every value is an object that isn't shown as a map, so the
+// line for it would only repeat its parent's.
+func (s *stat) plainObjects() bool {
+	return s.types[kObject] == s.n && !s.isMap()
 }
+
+// isMap: every object here has more than mapAt keys, so they're shown as
+// maps (their values merged under []) rather than by field.
+func (s *stat) isMap() bool { return s.maps > 0 && s.maps == s.objs }
 
 var kindWords = [nKinds][2]string{
 	{"object", "objects"}, {"array", "arrays"}, {"string", "strings"},
@@ -280,7 +316,10 @@ func (s *stat) detail(parentObjs int) string {
 	if s.types[kNull] > 0 && s.types[kNull] < s.n {
 		parts = append(parts, fmt.Sprintf("null ×%s", count(s.types[kNull])))
 	}
-	if s.maps > 0 {
+	if s.fieldsOver && !s.isMap() {
+		parts = append(parts, fmt.Sprintf("over %d keys; only the first %d are listed", fieldCap, fieldCap))
+	}
+	if s.isMap() {
 		keys := fmt.Sprintf("%s keys", count(s.mapMax))
 		if s.maps > 1 && s.mapMin != s.mapMax {
 			keys = fmt.Sprintf("%s to %s keys", count(s.mapMin), count(s.mapMax))
@@ -386,8 +425,7 @@ func num(v float64, isInt bool) string {
 }
 
 func quote(s string, n int) string {
-	q := strconv.Quote(clipRunes(s, n))
-	return q
+	return strconv.Quote(clipRunes(shown(s), n))
 }
 
 func quoteList(ss []string) string {

@@ -209,7 +209,7 @@ func runJSON(w io.Writer, name string, r io.Reader, o options, size int64, next 
 	}
 	if o.arg == "" {
 		fmt.Fprintf(w, "peek: %s  JSON, %s, %s\n", name, sizeText(size), describe(root))
-		shapeCard(w, name, []*node{root}, "", o.budget-1, next)
+		shapeCard(w, name, []*node{root}, "", less(o.budget, 1), next)
 		return 0
 	}
 	steps, err := parsePath(o.arg)
@@ -244,13 +244,10 @@ func shapeCard(w io.Writer, name string, vals []*node, path string, budget int, 
 func shapeOf(w io.Writer, name string, st *stat, path string, budget int, next *[]string) {
 	var all []row
 	rows(st, path, 0, 0, &all)
-	if len(all) > 1 && st.onlyContainers() {
+	if len(all) > 1 && st.plainObjects() {
 		all = all[1:] // the header said what the top is
 	}
-	room := budget
-	if budget > 0 {
-		room = max(budget-1, 1)
-	}
+	room := less(budget, 1)
 	lines, hidden := card(all, room)
 	for _, l := range lines {
 		fmt.Fprintln(w, l)
@@ -290,7 +287,7 @@ func showSelection(w io.Writer, name, path string, got []*node, why string, budg
 		if p == "." {
 			p = ""
 		}
-		shapeCard(w, name, got, p, budget-1, next)
+		shapeCard(w, name, got, p, less(budget, 1), next)
 		return 0
 	}
 	if allScalar(got) && len(got) <= listUpTo && (budget <= 0 || len(got) <= budget-1) {
@@ -313,7 +310,7 @@ func showSelection(w io.Writer, name, path string, got []*node, why string, budg
 	if p == "." {
 		p = ""
 	}
-	shapeOf(w, name, st, p, budget-1, next)
+	shapeOf(w, name, st, p, less(budget, 1), next)
 	return 0
 }
 
@@ -388,7 +385,7 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	}
 	if o.arg == "" {
 		fmt.Fprintln(w, head)
-		shapeOf(w, name, st, "", o.budget-1, next)
+		shapeOf(w, name, st, "", less(o.budget, 1), next)
 		return 0
 	}
 	path := formatPath(steps)
@@ -415,7 +412,7 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	if p == "." {
 		p = ""
 	}
-	shapeOf(w, name, st, p, o.budget-2, next)
+	shapeOf(w, name, st, p, less(o.budget, 2), next)
 	return 0
 }
 

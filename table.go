@@ -113,6 +113,9 @@ func renderTable(w io.Writer, name string, r io.Reader, delim rune, size int64, 
 			sample = append(sample, rec)
 		}
 	}
+	for header && len(cols) < len(first) { // a header without rows still names its columns
+		cols = append(cols, newStat())
+	}
 	kind := "CSV"
 	if delim == '\t' {
 		kind = "TSV"

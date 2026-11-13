@@ -38,6 +38,14 @@ func plural(n int, word string) string {
 	return count(n) + " " + p
 }
 
+// less is a budget with n lines taken, at least 1; 0 (no limit) stays 0.
+func less(budget, n int) int {
+	if budget <= 0 {
+		return 0
+	}
+	return max(budget-n, 1)
+}
+
 // sizeText is a byte count for people: 512 B, 48 KB, 1.2 MB.
 func sizeText(n int64) string {
 	switch {

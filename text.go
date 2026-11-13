@@ -17,7 +17,10 @@ const (
 )
 
 var (
-	// a level a logger wrote, which wins over the words in the message
+	// a level a logger or compiler wrote, which wins over the words in the
+	// message: "warning: x failed" (gcc, cargo), "level=info", "[main/WARN]"
+	reLead     = regexp.MustCompile(`(?i)^\s*(error|err|fatal|panic|warning|warn|info|note|notice|debug|trace|hint|help)(\[[^\]]*\])?:`)
+	reKV       = regexp.MustCompile(`(?i)\b(?:level|lvl|severity)"?\s*[=:]\s*"?([a-z]+)`)
 	reLevel    = regexp.MustCompile(`\b(TRACE|DEBUG|FINE|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL|CRIT|SEVERE|PANIC)\b`)
 	reError    = regexp.MustCompile(`(?i)\b(errors?|fatal|panic(ked)?|exceptions?|traceback|fail(s|ed|ures?)?|segfault)\b|^not ok\b`)
 	reNotError = regexp.MustCompile(`(?i)\b(0|no|zero) (errors?|failures?|failed)\b|\b(errors?|failures?|failed)[:=] ?0\b`)
@@ -158,20 +161,31 @@ func (t *textScan) line(n int, line string) {
 // one, the words do ("failed", "exception", "warning"), but not in "0 errors"
 // or "no warnings".
 func severity(line string) int {
+	if m := reLead.FindStringSubmatch(line); m != nil {
+		return levelOf(m[1])
+	}
+	if m := reKV.FindStringSubmatch(line); m != nil {
+		return levelOf(m[1])
+	}
 	if m := reLevel.FindString(line); m != "" {
-		switch m {
-		case "WARN", "WARNING":
-			return 1
-		case "ERROR", "ERR", "FATAL", "CRITICAL", "CRIT", "SEVERE", "PANIC":
-			return 2
-		}
-		return 0
+		return levelOf(m)
 	}
 	if reError.MatchString(line) && !reNotError.MatchString(line) {
 		return 2
 	}
 	if reWarn.MatchString(line) && !reNotWarn.MatchString(line) {
 		return 1
+	}
+	return 0
+}
+
+// levelOf is the severity of a level's name.
+func levelOf(level string) int {
+	switch strings.ToLower(level) {
+	case "warn", "warning":
+		return 1
+	case "error", "err", "fatal", "critical", "crit", "severe", "panic", "emerg", "alert":
+		return 2
 	}
 	return 0
 }
@@ -321,9 +335,10 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 	}
 	room-- // the header
 	nw := len(fmt.Sprintf("L%d", t.lines))
-	section := func(title string, gs *groups, limit int, sortBy func([]string)) {
+	var left []string // sections the budget left out
+	section := func(title string, gs *groups, limit int, sortBy func([]string)) bool {
 		if len(gs.order) == 0 || room < 2 {
-			return
+			return false
 		}
 		order := append([]string(nil), gs.order...)
 		if sortBy != nil {
@@ -343,17 +358,22 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 			fmt.Fprintf(w, "  … %s more\n", plural(rest, "kind"))
 			room--
 		}
+		return true
 	}
 	errTitle := "errors"
 	if len(t.errs.order) < t.errs.lines {
 		errTitle = fmt.Sprintf("errors (%s, %s)", count(t.errs.lines), plural(len(t.errs.order), "kind"))
 	}
-	section(errTitle, &t.errs, 12, nil)
+	if !section(errTitle, &t.errs, 12, nil) && len(t.errs.order) > 0 {
+		left = append(left, "errors")
+	}
 	warnTitle := "warnings"
 	if len(t.warns.order) < t.warns.lines {
 		warnTitle = fmt.Sprintf("warnings (%s, %s)", count(t.warns.lines), plural(len(t.warns.order), "kind"))
 	}
-	section(warnTitle, &t.warns, 6, nil)
+	if !section(warnTitle, &t.warns, 6, nil) && len(t.warns.order) > 0 {
+		left = append(left, "warnings")
+	}
 
 	// the most repeated templates that aren't errors or warnings
 	rep := groups{by: map[string]*group{}}
@@ -375,6 +395,8 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 			fmt.Fprintf(w, "  ×%-6s %-*s  %s\n", count(g.count), nw*2+1, fmt.Sprintf("L%d-%d", g.first, g.last), clipLine(tm))
 			room--
 		}
+	} else if len(rep.order) > 0 {
+		left = append(left, "most repeated lines")
 	}
 
 	// the first and last lines
@@ -404,6 +426,11 @@ func renderText(w io.Writer, name string, t *textScan, budget int, next *[]strin
 				fmt.Fprintf(w, "  %*d  %s\n", nw-1, l.n, clipLine(l.text))
 			}
 		}
+	} else if len(last) > 0 {
+		left = append(left, "last lines")
+	}
+	if len(left) > 0 {
+		fmt.Fprintf(w, "… left out for the budget: %s (a larger -b shows them)\n", strings.Join(left, ", "))
 	}
 	if len(t.errs.order) > 0 {
 		*next = append(*next, fmt.Sprintf("next: peek %s %d-%d   the lines around the first error", shellQuote(name), max(1, t.errs.by[t.errs.order[0]].first-5), t.errs.by[t.errs.order[0]].first+15))
@@ -424,7 +451,7 @@ func renderHits(w io.Writer, name string, t *textScan, pattern string, budget in
 	nw := len(fmt.Sprintf("L%d", t.lines))
 	show := len(gs.order)
 	if budget > 0 && show > budget-1 {
-		show = budget - 2
+		show = max(budget-2, 0)
 	}
 	for _, tm := range gs.order[:show] {
 		fmt.Fprintln(w, groupLine(gs.by[tm], nw))

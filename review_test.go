@@ -275,6 +275,53 @@ func TestDuplicateKeyLastWins(t *testing.T) {
 	wants(t, out, "\n2\n")
 }
 
+// The cases below are from GPT-6.1 Terra's re-check of cd284e6.
+
+func TestShortCSVDelimiter(t *testing.T) {
+	p := file(t, "short.csv", "name;age\nAlice;20\n")
+	out, _ := peek(t, "", p)
+	wants(t, out, "1 row, 2 columns (with a header)", "  age ")
+}
+
+func TestBrokenJSONOnStdin(t *testing.T) {
+	out, code := peek(t, `{"x": 1,}`+"\n")
+	if code != 2 || !strings.Contains(out, "not valid JSON") || !strings.Contains(out, "--as text") {
+		t.Errorf("exit %d:\n%s", code, out)
+	}
+}
+
+func TestJSONLinesMissedAlong(t *testing.T) {
+	out, _ := peek(t, `{"items":[{"x":1},{}]}`+"\n"+`{"items":[{"x":2},{"x":3}]}`+"\n", ".items[].x")
+	wants(t, out, "3 values from 2 records; in the others, 1 value along the way had nothing there")
+}
+
+func TestDuplicateKeyCard(t *testing.T) {
+	out, _ := peek(t, `{"x":1,"x":2}`, "--as", "json")
+	wants(t, out, ".x  number  2")
+	lacks(t, out, "1 to 2")
+	out, _ = peek(t, `{"x":1,"x":2}`, "--as", "json", ".")
+	wants(t, out, `"x": 2`)
+	lacks(t, out, `"x": 1`)
+}
+
+func TestLocatedSeverity(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want int
+	}{
+		{"src/main.rs:4:2: warning: unused variable", 1},
+		{"src/main.rs:5:2: note: details", 0},
+		{"src/main.rs:6:2: error: bad", 2},
+		{"x.c:3:1: error[E1]: bad", 2},
+		{"./main.go:10:5: undefined: foo", 2},
+		{"ok  pkg/ERROR 0.1s", 0},
+	} {
+		if got := severity(c.line); got != c.want {
+			t.Errorf("severity(%q) = %d, want %d", c.line, got, c.want)
+		}
+	}
+}
+
 func TestEmptyJSONLines(t *testing.T) {
 	p := file(t, "e.jsonl", "")
 	out, code := peek(t, "", p)

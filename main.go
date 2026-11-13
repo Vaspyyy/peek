@@ -20,7 +20,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 const defaultBudget = 60
 
@@ -106,7 +106,7 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 	case "jsonl":
 		code = runJSONL(out, name, r, o, size, &next)
 	case "csv", "tsv":
-		delim := sniffDelim(sample)
+		delim := sniffDelimN(sample, 1) // a .csv: one row is enough to tell
 		if kind == "tsv" {
 			delim = '\t'
 		} else if delim == 0 {
@@ -185,8 +185,8 @@ func detect(file string, sample []byte) string {
 		if len(lines) >= 2 && json.Valid(lines[0]) && json.Valid(lines[1]) {
 			return "jsonl"
 		}
-		if jsonPrefix(t) {
-			return "json"
+		if t[0] == '{' || jsonPrefix(t) {
+			return "json" // a broken document is reported, not shown as text
 		}
 		// "[10:00:00] INFO", "[ 50%] Building": text that starts like JSON
 	}
@@ -254,7 +254,7 @@ func runJSON(w io.Writer, name string, r io.Reader, o options, size int64, next 
 		return runJSONL(w, name, bytes.NewReader(data), o, size, next)
 	}
 	if err != nil {
-		fmt.Fprintf(w, "peek: %s  not valid JSON: %v\n", name, err)
+		fmt.Fprintf(w, "peek: %s  not valid JSON: %v (--as text reads it as text)\n", name, err)
 		return 2
 	}
 	if o.arg == "" {
@@ -392,7 +392,7 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	st := newStat()
 	var picked []*node
 	pickedOver := false
-	records, bad, firstBad, missing := 0, 0, 0, 0
+	records, bad, firstBad, missing, missedAlong := 0, 0, 0, 0, 0
 	firstWhy := ""
 	var read int64
 	br := bufio.NewReaderSize(r, 1<<20)
@@ -413,7 +413,10 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 				if steps == nil && o.arg == "" {
 					st.add(rec)
 				} else {
-					got, why, _ := selectPath([]*node{rec}, steps)
+					got, why, missed := selectPath([]*node{rec}, steps)
+					if got != nil {
+						missedAlong += missed
+					}
 					if got == nil {
 						missing++
 						if firstWhy == "" {
@@ -463,6 +466,9 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	what := fmt.Sprintf("%s: %s from %s", path, plural(st.n, "value"), plural(records-missing, "record"))
 	if missing > 0 {
 		what += fmt.Sprintf(" (not in %s)", count(missing))
+	}
+	if missedAlong > 0 {
+		what += fmt.Sprintf("; in the others, %s along the way had nothing there", plural(missedAlong, "value"))
 	}
 	fmt.Fprintf(w, "%s\n%s\n", head, what)
 	if !st.isContainer() {

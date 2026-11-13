@@ -80,7 +80,11 @@ func (s *stat) add(n *node) {
 		if s.fields == nil {
 			s.fields = map[string]*stat{}
 		}
+		keep := lastKeys(n.keys)
 		for i, k := range n.keys {
+			if !keep[i] {
+				continue // a repeated key: its last value counts, as in jq
+			}
 			f := s.fields[k]
 			if f == nil {
 				if len(s.keys) >= fieldCap {
@@ -158,6 +162,24 @@ func (s *stat) add(n *node) {
 			s.f++
 		}
 	}
+}
+
+// lastKeys marks the keys that don't come again later in the object; nil
+// (keep all) when no key repeats, which is nearly always.
+func lastKeys(keys []string) []bool {
+	seen := make(map[string]int, len(keys))
+	dup := false
+	for i, k := range keys {
+		if _, ok := seen[k]; ok {
+			dup = true
+		}
+		seen[k] = i
+	}
+	keep := make([]bool, len(keys))
+	for i, k := range keys {
+		keep[i] = !dup || seen[k] == i
+	}
+	return keep
 }
 
 // numLess compares two numbers, exactly when their float values are equal

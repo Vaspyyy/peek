@@ -25,7 +25,7 @@ var (
 	// lines of passing tests, whatever their names say ("--- PASS: TestError")
 	rePass = regexp.MustCompile(`^\s*(ok\s|--- PASS|=== (RUN|PAUSE|CONT|NAME)\b|PASS\s*$|test .* \.\.\. ok\s*$)`)
 	// a compiler's or linter's "path:line:col: message"
-	reLocated = regexp.MustCompile(`^\S+\.\w+:\d+(:\d+)?: `)
+	reLocated = regexp.MustCompile(`^\S+\.\w+:\d+(:\d+)?: (?:([A-Za-z]+)(?:\[[^\]]*\])?:)?`)
 	// CamelCase names of errors and warnings: ValueError, IOException
 	reErrName  = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*(Error|Exception)\b`)
 	reWarnName = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*Warning\b`)
@@ -171,6 +171,9 @@ func (t *textScan) line(n int, line string) {
 // one, the words do ("failed", "exception", "warning"), but not in "0 errors"
 // or "no warnings".
 func severity(line string) int {
+	if rePass.MatchString(line) {
+		return 0 // a passing test, whatever its name says ("ok  pkg/ERROR")
+	}
 	if m := reLead.FindStringSubmatch(line); m != nil {
 		return levelOf(m[1])
 	}
@@ -180,11 +183,18 @@ func severity(line string) int {
 	if m := reLevel.FindString(line); m != "" {
 		return levelOf(m)
 	}
-	if rePass.MatchString(line) {
-		return 0
-	}
-	if reLocated.MatchString(line) {
-		return 2 // a compiler error; its warnings and notes say so first
+	if m := reLocated.FindStringSubmatch(line); m != nil {
+		// a compiler's message: "warning:" and "note:" after the location
+		// say what it is; anything else there is an error
+		if lv := strings.ToLower(m[2]); lv != "" {
+			switch lv {
+			case "warning", "warn":
+				return 1
+			case "note", "info", "help", "hint":
+				return 0
+			}
+		}
+		return 2
 	}
 	// "0 errors" and "Errors: 0" go, and so does the rest's meaning
 	clean := reNotFail.ReplaceAllString(reNotError.ReplaceAllString(line, " "), " ")

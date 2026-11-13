@@ -11,7 +11,11 @@ import (
 
 // sniffDelim finds the delimiter that splits the first lines into the same
 // number (two or more) of fields, or 0.
-func sniffDelim(sample []byte) rune {
+func sniffDelim(sample []byte) rune { return sniffDelimN(sample, 3) }
+
+// sniffDelimN is sniffDelim needing at least minRows rows: three to call
+// unknown text a table, one for a file that is a table by its name.
+func sniffDelimN(sample []byte, minRows int) rune {
 	lines := bytes.Split(sample, []byte("\n"))
 	if len(lines) > 1 && len(lines[len(lines)-1]) > 0 {
 		lines = lines[:len(lines)-1] // the sample may end inside a line
@@ -25,7 +29,7 @@ func sniffDelim(sample []byte) rune {
 			break
 		}
 	}
-	if len(rows) < 3 { // two lines with a comma each aren't a table yet
+	if len(rows) < minRows { // two lines with a comma each aren't a table yet
 		return 0
 	}
 	for _, d := range []rune{'\t', ',', ';', '|'} {
@@ -34,7 +38,7 @@ func sniffDelim(sample []byte) rune {
 		r.LazyQuotes = true
 		r.FieldsPerRecord = -1
 		recs, err := r.ReadAll()
-		if err != nil || len(recs) < 2 {
+		if err != nil || len(recs) < minRows {
 			continue
 		}
 		n := len(recs[0])

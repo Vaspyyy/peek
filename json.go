@@ -399,20 +399,27 @@ func pretty(n *node) []string {
 			}
 			cur.WriteString("{")
 			flush()
-			show := len(n.keys)
+			keep := lastKeys(n.keys) // a repeated key shows its last value, as in jq
+			var idx []int
+			for i := range n.keys {
+				if keep[i] {
+					idx = append(idx, i)
+				}
+			}
+			show := len(idx)
 			if show > maxKeys {
 				show = maxKeys * 2 / 3
 			}
-			for i := 0; i < show; i++ {
+			for j, i := range idx[:show] {
 				cur.WriteString(ind + "  " + jsonQuote(n.keys[i]) + ": ")
 				walk(n.vals[i], ind+"  ")
-				if i < len(n.keys)-1 {
+				if j < len(idx)-1 {
 					cur.WriteString(",")
 				}
 				flush()
 			}
-			if show < len(n.keys) {
-				cur.WriteString(fmt.Sprintf("%s  … %d more keys", ind, len(n.keys)-show))
+			if show < len(idx) {
+				cur.WriteString(fmt.Sprintf("%s  … %d more keys", ind, len(idx)-show))
 				flush()
 			}
 			cur.WriteString(ind + "}")

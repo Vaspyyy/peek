@@ -48,7 +48,7 @@ peek: data.json  JSON, 374 B, object with 3 keys
 next: peek data.json '.levels[0]'   the first element in full
 ```
 
-Every path appears once. Arrays are merged, so `.levels[].id` covers the `id` of every element, and a field that only some elements have says how many (`in 1 of 3`). Strings show their value, the counts of a few repeated values, or the number of distinct values with examples; numbers show their range; booleans their counts. Where every object at a path has more than 40 keys and all their values have one kind (IDs to records, names to strings), the objects are read as maps: the card shows how many keys they have with examples, and their values merged under `[]`, as in jq. Numbers are shown as written, so a range of 19-digit IDs or epoch times isn't rounded. Past 200 distinct strings at one path, the most frequent ones are estimates (`most often about`).
+Every path appears once. Arrays are merged, so `.levels[].id` covers the `id` of every element, and a field that only some elements have says how many (`in 1 of 3`). Strings show their value, the counts of a few repeated values, or the number of distinct values with examples; numbers show their range; booleans their counts. Where every object at a path has more than 40 keys and all their values have one kind (IDs to records, names to strings), the objects are read as maps: the card shows how many keys they have with examples, and their values merged under `[]`, as in jq. Numbers are shown as written, so a range of 19-digit IDs or epoch times isn't rounded. Past 200 distinct strings at one path, counting goes on approximately (space-saving), and only what is sure is shown: `over 200 distinct, repeated at least: "hot" ×500`.
 
 The paths are jq paths, so any printed path can be given back (quote it, since `[` is special to the shell):
 
@@ -111,8 +111,9 @@ Lines are grouped by template: the line with its numbers (and their signs), hex 
 A line is an error or a warning by the level it starts with or its logger wrote (`error:`, `warning[…]:`, `level=info`, `"level":"warn"`, `ERROR`, `[main/WARN]`, `INF`, `WRN`, …) when it has one. Otherwise:
 
 - lines of passing tests (`ok  pkg`, `--- PASS`, `=== RUN`, `test x ... ok`) are neither, whatever their names say;
-- a compiler's `path:line:col: message` is an error;
-- the words `error`, `fatal`, `panic`, `exception`, `traceback`, `fail`, `failed`, `failure`, `segfault`, a line starting with `not ok`, `2 failing`, or a name like `ValueError` or `IOException` make an error, and `warn`, `warning` or a name like `DeprecationWarning` a warning. A word inside a name (`pkg/errors`, `TestDecode/error`, `errors::parses`) doesn't count, nor do `0 errors`, `no warnings`, `Errors: 0`, `0 tests failed` or `fail-fast`, while the rest of the line still does (`Failures: 3, Errors: 0` is an error).
+- after a location (`path:line:` or `path:line:col:`), a level word decides (`warning:`, `note:`, `DeprecationWarning:`); without one, `path:line:col: message` is an error, as Go's compiler writes them, and `path:line: message` goes by its words;
+- `Caused by: …` (a Java cause) is an error;
+- the words `error`, `fatal`, `panic`, `exception`, `traceback`, `fail`, `failed`, `failure`, `segfault`, a line starting with `not ok`, `2 failing`, or a name like `ValueError` or `IOException` make an error, and `warn`, `warning` or a name like `DeprecationWarning` a warning. A word or error name inside a path or file name (`pkg/errors`, `TestDecode/error`, `errors::parses`, `ValidationError.swift`, `at com.x.AppException.<init>`) doesn't count, unless a message follows it (`IOException: disk full`); a word ending a sentence (`Deploy failed.`) does. `0 errors`, `no warnings`, `Errors: 0`, `0 tests failed` and `fail-fast` don't count, while the rest of the line still does (`Failures: 3, Errors: 0` is an error). A `level=` value counts only when it is a level name.
 
 Long lines keep their start and their end with the middle cut (`…(1,505 chars)…`), since the end of an error line often says why. A text that fits the budget is shown whole.
 
@@ -121,7 +122,7 @@ Long lines keep their start and their end with the middle cut (`…(1,505 chars)
 
 ### Anything else
 
-A file is read by its extension (`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `.log`, `.txt`, …), else by its content: JSON as far as the first 64 KB go (a `[10:00:00]` log isn't), lines that are each JSON, or at least three rows that split evenly on commas, tabs, semicolons or pipes. `--as json|jsonl|csv|tsv|text` overrides that. A byte order mark is skipped. A binary file (NUL bytes, or the first bytes of PNG, JPEG, gzip, zip, ELF, PDF, SQLite and a few more) is named, not printed. Standard input works for any kind: `gh api repos/o/r/pulls | peek`, `| peek '.[].title'`, `| peek .`; `next:` hints are left out there, since they'd name a file that doesn't exist.
+A file is read by its extension (`.json`, `.jsonl`, `.ndjson`, `.csv`, `.tsv`, `.log`, `.txt`, …, and rotated logs like `app.log.1`), else by its content: JSON as far as the first 64 KB go (a `[10:00:00]` log isn't; content starting with `{` that doesn't parse is reported as broken JSON), lines that are each JSON, several JSON values one after another (`jq` output), or at least three rows that split evenly on commas, tabs, semicolons or pipes, unless most of them carry a log level (Python's logging has a comma in its timestamps). `--as json|jsonl|csv|tsv|text` overrides that. A byte order mark is skipped. A binary file (NUL bytes, or the first bytes of PNG, JPEG, gzip, zip, ELF, PDF, SQLite and a few more) is named, not printed. Standard input works for any kind: `gh api repos/o/r/pulls | peek`, `| peek '.[].title'`, `| peek .`; `next:` hints are left out there, since they'd name a file that doesn't exist.
 
 ### Flags
 

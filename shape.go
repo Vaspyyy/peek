@@ -47,8 +47,9 @@ type stat struct {
 
 	// strings
 	strs    map[string]int
-	strOver bool     // more than strCap distinct: counts are estimates (space-saving)
-	order   []string // distinct strings in the order seen (up to strCap)
+	errs    map[string]int // past strCap: how much each count may be over (space-saving)
+	strOver bool           // more than strCap distinct: counts are estimates (space-saving)
+	order   []string       // distinct strings in the order seen (up to strCap)
 
 	// numbers
 	nums             int
@@ -132,8 +133,13 @@ func (s *stat) add(n *node) {
 			}
 			c := s.strs[s.order[low]]
 			delete(s.strs, s.order[low])
+			if s.errs == nil {
+				s.errs = map[string]int{}
+			}
+			delete(s.errs, s.order[low])
 			s.order[low] = key
 			s.strs[key] = c + 1
+			s.errs[key] = c // its true count is at least c+1-c
 		}
 	case kNumber:
 		v, _ := strconv.ParseFloat(n.text, 64)
@@ -298,13 +304,13 @@ func (s *stat) isMap() bool {
 	if s.maps == 0 || s.maps != s.objs || s.mapVals == nil {
 		return false
 	}
-	kinds := 0 // a map's values have one kind; a wide record's are mixed
-	for _, c := range s.mapVals.types {
-		if c > 0 {
+	kinds := 0 // a map's values have one kind (or null); a wide record's are mixed
+	for k, c := range s.mapVals.types {
+		if c > 0 && k != kNull {
 			kinds++
 		}
 	}
-	return kinds == 1
+	return kinds <= 1
 }
 
 var kindWords = [nKinds][2]string{
@@ -434,15 +440,19 @@ func (s *stat) strDetail() string {
 	if s.strOver {
 		// counts past the cap are estimates; show the strings that repeat
 		many = fmt.Sprintf("over %s distinct", count(strCap))
+		// only what is sure: a count less its possible excess
+		sure := func(v string) int { return s.strs[v] - s.errs[v] }
+		vs := append([]string(nil), s.order...)
+		sort.SliceStable(vs, func(i, j int) bool { return sure(vs[i]) > sure(vs[j]) })
 		var hot []string
-		for _, v := range s.byCount() {
-			if s.strs[v] < 2 || len(hot) == 3 {
+		for _, v := range vs {
+			if sure(v) < 2 || len(hot) == 3 {
 				break
 			}
-			hot = append(hot, fmt.Sprintf("%s ×%s", quote(v, 30), count(s.strs[v])))
+			hot = append(hot, fmt.Sprintf("%s ×%s", quote(v, 30), count(sure(v))))
 		}
 		if len(hot) > 0 {
-			return many + ", most often about " + strings.Join(hot, ", ")
+			return many + ", repeated at least: " + strings.Join(hot, ", ")
 		}
 	} else if top := s.topStrings(3); distinct < n && s.repeated(3) {
 		return many + ", most often " + top

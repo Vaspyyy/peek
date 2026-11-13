@@ -32,6 +32,7 @@ var (
 	// words that aren't failures: "fail-fast", "failover"
 	reNotFail  = regexp.MustCompile(`(?i)\bfail-(fast|safe|over)\b|\bfailover\b`)
 	reFailing  = regexp.MustCompile(`\b[1-9]\d* failing\b`)
+	reCaused   = regexp.MustCompile(`^\s*Caused by: `)
 	reError    = regexp.MustCompile(`(?i)\b(errors?|fatal|panic(ked)?|exceptions?|traceback|fail(s|ed|ures?)?|segfault)\b|^not ok\b`)
 	reNotError = regexp.MustCompile(`(?i)\b(0|no|zero)( \w+)? (errors?|failures?|failed)\b|\b(errors?|failures?|failed)[:=] ?0\b`)
 	reWarn     = regexp.MustCompile(`(?i)\bwarn(ing|ings|s)?\b`)
@@ -177,28 +178,35 @@ func severity(line string) int {
 	if m := reLead.FindStringSubmatch(line); m != nil {
 		return levelOf(m[1])
 	}
-	if m := reKV.FindStringSubmatch(line); m != nil {
+	if m := reKV.FindStringSubmatch(line); m != nil && knownLevel(m[1]) {
 		return levelOf(m[1])
 	}
 	if m := reLevel.FindString(line); m != "" {
 		return levelOf(m)
 	}
 	if m := reLocated.FindStringSubmatch(line); m != nil {
-		// a compiler's message: "warning:" and "note:" after the location
-		// say what it is; anything else there is an error
-		if lv := strings.ToLower(m[2]); lv != "" {
-			switch lv {
-			case "warning", "warn":
-				return 1
-			case "note", "info", "help", "hint":
-				return 0
-			}
+		// "path:line[:col]: message": a level word there says what it is
+		// ("warning:", "note:", "DeprecationWarning:"); without one,
+		// "path:line:col:" is how Go's compiler writes an error, and
+		// otherwise the message's own words decide, below
+		lv := strings.ToLower(m[2])
+		switch {
+		case lv == "warning" || lv == "warn" || strings.HasSuffix(lv, "warning"):
+			return 1
+		case lv == "note" || lv == "info" || lv == "help" || lv == "hint":
+			return 0
+		case lv == "error" || lv == "fatal" || strings.HasSuffix(lv, "error") || strings.HasSuffix(lv, "exception"):
+			return 2
+		case m[1] != "":
+			return 2
 		}
+	}
+	if reCaused.MatchString(line) {
 		return 2
 	}
 	// "0 errors" and "Errors: 0" go, and so does the rest's meaning
 	clean := reNotFail.ReplaceAllString(reNotError.ReplaceAllString(line, " "), " ")
-	if errorWord(clean) || reErrName.MatchString(clean) || reFailing.MatchString(clean) {
+	if errorWord(clean) || errorName(clean) || reFailing.MatchString(clean) {
 		return 2
 	}
 	clean = reNotWarn.ReplaceAllString(line, " ")
@@ -213,14 +221,78 @@ func severity(line string) int {
 // "errors::parses_ok" it doesn't.
 func errorWord(line string) bool {
 	for _, m := range reError.FindAllStringIndex(line, -1) {
-		a, b := m[0], m[1]
-		inName := a > 0 && strings.IndexByte("/._", line[a-1]) >= 0 ||
-			b < len(line) && strings.IndexByte("/._", line[b]) >= 0 ||
-			b+1 < len(line) && line[b] == ':' && line[b+1] == ':' ||
-			a > 1 && line[a-1] == ':' && line[a-2] == ':'
-		if !inName {
+		if !inName(line, m[0], m[1]) {
 			return true
 		}
+	}
+	return false
+}
+
+// errorName finds a name like ValueError or IOException that is an error
+// being reported: with a message after it ("IOException: disk full"), or
+// on its own, but not as part of a file or class path
+// ("ValidationError.swift", "at com.x.AppException.<init>").
+func errorName(line string) bool {
+	for _, m := range reErrName.FindAllStringIndex(line, -1) {
+		if m[1] < len(line) && line[m[1]] == ':' && (m[1]+1 == len(line) || line[m[1]+1] != ':') {
+			return true
+		}
+		if !inName(line, m[0], m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// inName tells whether line[a:b] is part of a name: a path ("pkg/errors"),
+// a file or member ("errors.go", "x.errors"), a Rust path ("errors::x"), an
+// identifier ("error_count"). A word that ends a sentence ("failed.") or a
+// status ("1/FAILURE") isn't.
+func inName(line string, a, b int) bool {
+	alnum := func(i int) bool {
+		if i < 0 || i >= len(line) {
+			return false
+		}
+		c := line[i]
+		return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	}
+	if a > 0 {
+		switch line[a-1] {
+		case '_':
+			return true
+		case '/':
+			if !(a > 1 && line[a-2] >= '0' && line[a-2] <= '9') {
+				return true
+			}
+		case '.':
+			if alnum(a - 2) {
+				return true
+			}
+		case ':':
+			if a > 1 && line[a-2] == ':' {
+				return true
+			}
+		}
+	}
+	if b < len(line) {
+		switch line[b] {
+		case '_', '/':
+			return true
+		case '.', '-':
+			return alnum(b + 1)
+		case ':':
+			return b+1 < len(line) && line[b+1] == ':'
+		}
+	}
+	return false
+}
+
+// knownLevel: a word a logger writes as a level, so "level=max" isn't one.
+func knownLevel(w string) bool {
+	switch strings.ToLower(w) {
+	case "trace", "trc", "debug", "dbg", "fine", "info", "inf", "notice", "warn", "warning", "wrn",
+		"error", "err", "fatal", "ftl", "critical", "crit", "severe", "panic", "emerg", "alert":
+		return true
 	}
 	return false
 }

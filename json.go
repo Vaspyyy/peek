@@ -370,6 +370,40 @@ const (
 
 var maxStr, maxElems, maxKeys = defStr, defElems, defKeys
 
+// compactTo writes n as JSON on one line.
+func compactTo(b *bytes.Buffer, n *node) {
+	switch n.kind {
+	case kObject:
+		b.WriteByte('{')
+		for i, k := range n.keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(jsonQuote(k))
+			b.WriteByte(':')
+			compactTo(b, n.vals[i])
+		}
+		b.WriteByte('}')
+	case kArray:
+		b.WriteByte('[')
+		for i, v := range n.vals {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			compactTo(b, v)
+		}
+		b.WriteByte(']')
+	case kString:
+		b.WriteString(jsonQuote(n.text))
+	case kNumber:
+		b.WriteString(n.text)
+	case kBool:
+		b.WriteString(strconv.FormatBool(n.b))
+	default:
+		b.WriteString("null")
+	}
+}
+
 // jsonQuote writes s as a JSON string, without escaping & < > as Go's
 // encoder does for HTML.
 func jsonQuote(s string) string {

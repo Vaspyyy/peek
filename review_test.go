@@ -4,6 +4,8 @@ package main
 // Terra, Opus 5.5 and Sonnet 5.5, 2026-11-13).
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -119,7 +121,7 @@ func TestDetection(t *testing.T) {
 		fmt.Fprintf(&b, `{"n": %d, "s": %q}`+"\n", i, big)
 	}
 	out, code = peek(t, b.String())
-	if code != 0 || !strings.Contains(out, "JSON Lines, 5 records") {
+	if code != 0 || !strings.Contains(out, "one after another, 5 records") {
 		t.Errorf("long JSON Lines: exit %d:\n%s", code, out)
 	}
 	out, _ = peek(t, "SELECT 1;\nSELECT 2;\nSELECT 3;\n")
@@ -187,7 +189,19 @@ func TestManyStringsTopIsRight(t *testing.T) {
 	}
 	p := file(t, "s.json", "["+strings.Join(vals, ",")+"]")
 	out, _ := peek(t, "", p)
-	wants(t, out, `most often about "hot"`)
+	wants(t, out, `repeated at least: "hot" ×500`)
+	// unique strings past the cap aren't shown as repeats
+	var uniq []string
+	for i := 0; i < 1000; i++ {
+		uniq = append(uniq, fmt.Sprintf("%q", fmt.Sprintf("user-%d", i)))
+	}
+	for i := 0; i < 5; i++ {
+		uniq = append(uniq, `"hot"`)
+	}
+	p = file(t, "u.json", "["+strings.Join(uniq, ",")+"]")
+	out, _ = peek(t, "", p)
+	wants(t, out, `repeated at least: "hot" ×5`)
+	lacks(t, out, `"user-`)
 }
 
 func TestWideRecordIsNotAMap(t *testing.T) {
@@ -319,6 +333,95 @@ func TestLocatedSeverity(t *testing.T) {
 		if got := severity(c.line); got != c.want {
 			t.Errorf("severity(%q) = %d, want %d", c.line, got, c.want)
 		}
+	}
+}
+
+// The cases below are from Opus 5.5's re-check of cd284e6.
+
+func TestSeverityInContext(t *testing.T) {
+	for _, c := range []struct {
+		line string
+		want int
+	}{
+		{"Deploy failed.", 2},
+		{"Build FAILED.", 2},
+		{"Found 2 errors. Watching for file changes.", 2},
+		{"Main process exited, code=exited, status=1/FAILURE", 2},
+		{"Compiling ValidationError.swift", 0},
+		{"modified:   src/errors/ValidationError.ts", 0},
+		{" src/components/AppError.tsx | 12 +++", 0},
+		{"\tat com.x.ValidationException.<init>(ValidationException.java:12)", 0},
+		{"Downloading HttpException-1.2.jar", 0},
+		{"Caused by: java.io.IOException: disk full", 2},
+		{"Caused by: java.lang.NullPointerException", 2},
+		{"x.py:3: DeprecationWarning: old", 1},
+		{"README.md:3: trailing whitespace", 0},
+		{"config.yaml:12: key: value", 0},
+		{"main.c:3:5: warning: unused variable 'x'", 1},
+		{"main.c:3:5: note: declared here", 0},
+		{"./main.go:10:5: undefined: foo", 2},
+		{`Failed to set log level: invalid value "verbose"`, 2},
+		{"connection failed (retry level=max)", 2},
+		{"level=warn msg=slow", 1},
+	} {
+		if got := severity(c.line); got != c.want {
+			t.Errorf("severity(%q) = %d, want %d", c.line, got, c.want)
+		}
+	}
+}
+
+func TestJQStream(t *testing.T) {
+	out, code := peek(t, "{\n \"a\": 1\n}\n{\n \"a\": 2\n}\n")
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	wants(t, out, "JSON values one after another, 2 records", ".a  number  1 to 2")
+}
+
+func TestPythonLoggingIsText(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&b, "2026-01-01 10:00:%02d,123 - app - INFO - step %d\n", i, i)
+	}
+	b.WriteString("2026-01-01 10:00:59,999 - app - ERROR - it broke\n")
+	out, _ := peek(t, b.String())
+	wants(t, out, "1 error", "it broke")
+	lacks(t, out, "CSV")
+	p := file(t, "app.log.1", b.String())
+	out, code := peek(t, "", p, "-g", "ERROR")
+	if code != 0 || !strings.Contains(out, "it broke") {
+		t.Errorf("app.log.1 -g: exit %d:\n%s", code, out)
+	}
+}
+
+func TestMapWithNulls(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("{")
+	for i := 0; i < 60; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if i%3 == 0 {
+			fmt.Fprintf(&b, `"u%d": null`, i)
+		} else {
+			fmt.Fprintf(&b, `"u%d": {"n": %d}`, i, i)
+		}
+	}
+	b.WriteString("}")
+	p := file(t, "m.json", b.String())
+	out, _ := peek(t, "", p)
+	wants(t, out, `60 keys like "u0", "u1", "u2"`, ".[].n")
+	lacks(t, out, ".u1 ")
+}
+
+func TestEmptyStdinWithAPath(t *testing.T) {
+	// peek() takes "" for a terminal; this needs an empty pipe
+	var b bytes.Buffer
+	w := bufio.NewWriter(&b)
+	code := run([]string{".missing.json"}, strings.NewReader(""), false, w)
+	w.Flush()
+	if code != 2 || !strings.Contains(b.String(), "nothing came on stdin") {
+		t.Errorf("exit %d:\n%s", code, b.String())
 	}
 }
 

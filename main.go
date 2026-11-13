@@ -20,7 +20,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 
 const defaultBudget = 60
 
@@ -84,6 +84,10 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 		maxStr, maxElems, maxKeys = 1<<30, 1<<30, 1<<30
 	}
 	sample, _ := r.Peek(64 << 10)
+	if o.file == "-" && len(sample) == 0 && o.arg != "" {
+		fmt.Fprintf(out, "peek: nothing came on stdin for the path %s, and there's no file by that name\n", o.arg)
+		return 2
+	}
 	kind := o.kind
 	if kind == "" {
 		kind = detect(o.file, sample)
@@ -104,7 +108,7 @@ func run(args []string, stdin io.Reader, stdinTTY bool, out *bufio.Writer) int {
 	case "json":
 		code = runJSON(out, name, r, o, size, &next)
 	case "jsonl":
-		code = runJSONL(out, name, r, o, size, &next)
+		code = runJSONL(out, name, r, o, size, &next, "JSON Lines")
 	case "csv", "tsv":
 		delim := sniffDelimN(sample, 1) // a .csv: one row is enough to tell
 		if kind == "tsv" {
@@ -161,6 +165,12 @@ func detect(file string, sample []byte) string {
 	if magic(sample) != "" {
 		return "binary"
 	}
+	if strings.Contains(strings.ToLower(filepath.Base(file)), ".log.") { // app.log.1, app.log.2026-11-13
+		if bytes.IndexByte(sample, 0) >= 0 {
+			return "binary"
+		}
+		return "text"
+	}
 	switch strings.ToLower(filepath.Ext(file)) {
 	case ".json", ".geojson", ".har", ".ipynb":
 		return "json"
@@ -190,10 +200,23 @@ func detect(file string, sample []byte) string {
 		}
 		// "[10:00:00] INFO", "[ 50%] Building": text that starts like JSON
 	}
-	if sniffDelim(sample) != 0 {
+	if sniffDelim(sample) != 0 && !looksLikeLog(sample) {
 		return "csv"
 	}
 	return "text"
+}
+
+// looksLikeLog: most of the first lines carry a log level ("- INFO -",
+// "[WARN]"), as Python's logging does with a comma in its timestamps.
+func looksLikeLog(sample []byte) bool {
+	lines := nonBlankLines(sample, 20)
+	n := 0
+	for _, l := range lines {
+		if reLevel.Match(l) {
+			n++
+		}
+	}
+	return len(lines) > 0 && n*2 >= len(lines)
 }
 
 // jsonPrefix tells whether b is JSON as far as it goes (it may be cut off).
@@ -250,8 +273,25 @@ func runJSON(w io.Writer, name string, r io.Reader, o options, size int64, next 
 		size = int64(len(data))
 	}
 	root, err := parseJSON(data)
-	if errors.Is(err, errMulti) { // one value after another: JSON Lines with long lines
-		return runJSONL(w, name, bytes.NewReader(data), o, size, next)
+	if errors.Is(err, errMulti) {
+		// one value after another (jq output, JSON Lines with long lines):
+		// each value is a record
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		var lines bytes.Buffer
+		for {
+			v, derr := decodeOne(dec)
+			if derr == io.EOF {
+				break
+			}
+			if derr != nil {
+				fmt.Fprintf(w, "peek: %s  not valid JSON: %v (--as text reads it as text)\n", name, jsonError(data, dec, derr))
+				return 2
+			}
+			compactTo(&lines, v)
+			lines.WriteByte('\n')
+		}
+		return runJSONL(w, name, &lines, o, size, next, "JSON values one after another")
 	}
 	if err != nil {
 		fmt.Fprintf(w, "peek: %s  not valid JSON: %v (--as text reads it as text)\n", name, err)
@@ -380,7 +420,7 @@ func showSelection(w io.Writer, name, path string, got []*node, why string, miss
 }
 
 // runJSONL reads JSON Lines one record at a time.
-func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next *[]string) int {
+func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next *[]string, label string) int {
 	var steps []step
 	if o.arg != "" {
 		var err error
@@ -447,7 +487,7 @@ func runJSONL(w io.Writer, name string, r io.Reader, o options, size int64, next
 	if size < 0 {
 		size = read
 	}
-	head := fmt.Sprintf("peek: %s  JSON Lines, %s, %s", name, plural(records, "record"), sizeText(size))
+	head := fmt.Sprintf("peek: %s  %s, %s, %s", name, label, plural(records, "record"), sizeText(size))
 	if bad > 0 {
 		head += fmt.Sprintf("; %s not JSON (first: line %d)", plural(bad, "line"), firstBad)
 	}
